@@ -1,0 +1,25 @@
+{
+  "name": "cotai-backend",
+  "version": "0.1.0",
+  "description": "CotAI – Hub de cotação inteligente via WhatsApp",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "db:migrate": "node src/db/migrate.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@supabase/supabase-js": "^2.49.0",
+    "axios": "^1.8.0",
+    "dotenv": "^16.4.0",
+    "fastify": "^5.2.0",
+    "@fastify/multipart": "^9.0.0",
+    "@fastify/cors": "^10.0.0",
+    "form-data": "^4.0.1",
+    "node-cron": "^3.0.3",
+    "xlsx": "^0.18.5",
+    "zod": "^3.24.0"
+  }
+}
