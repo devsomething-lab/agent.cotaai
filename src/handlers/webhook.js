@@ -6,7 +6,7 @@ import { extrairCatalogo, classificarMensagemRep } from '../agents/catalogo_agen
 import { consolidarPropostas } from '../agents/consolidator.js'
 import { resolverCotacaoAutomatica, salvarPropostasAutomaticas } from '../agents/auto_quote.js'
 import { upsertCatalogoEmLote, salvarPromocao } from '../db/catalogo.js'
-import { sendText, downloadMedia, normalizeMetaPayload,
+import { sendText, sendTextOrTemplate, downloadMedia, normalizeMetaPayload,
          templateCotacaoParaRep, templateComparativo, templatePedidoConfirmado } from '../services/whatsapp.js'
 import * as XLSX from 'xlsx'
 import 'dotenv/config'
@@ -156,7 +156,7 @@ async function dispararParaRepsManuais(cotacao, itens, reps) {
   const template = templateCotacaoParaRep(itens, cotacao.id)
   for (const rep of reps) {
     try {
-      await sendText(rep.telefone, template)
+      await sendTextOrTemplate(rep.telefone, template, rep.nome)
       await supabase.from('cotacao_envios').insert({
         cotacao_id: cotacao.id, representante_id: rep.id,
         modo_resposta: 'aguardando', status: 'aguardando',

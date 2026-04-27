@@ -189,3 +189,38 @@ export function normalizeMetaPayload(body) {
     return { phone, message, type, mediaId, mimeType, rawMsgId: msg.id }
   } catch(err) { console.error('[normalizeMetaPayload]', err.message); return null }
 }
+
+export async function sendTemplate(telefone, templateName, params = []) {
+  const components = params.length ? [{
+    type: 'body',
+    parameters: params.map(p => ({ type: 'text', text: String(p) })),
+  }] : []
+  try {
+    const { data } = await meta.post(`/${PHONE_NUMBER_ID}/messages`, {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: telefone,
+      type: 'template',
+      template: { name: templateName, language: { code: 'pt_BR' }, components },
+    })
+    return { ok: true, data }
+  } catch (err) {
+    console.error('[sendTemplate] erro:', err.response?.data ?? err.message)
+    return { ok: false, error: err.response?.data }
+  }
+}
+
+export async function sendTextOrTemplate(telefone, texto, nomeRep) {
+  try {
+    await sendText(telefone, texto)
+    return { via: 'text' }
+  } catch (err) {
+    const code = err.response?.data?.error?.code
+    if (code === 131047 || code === 131026) {
+      console.log('[whatsapp] janela fechada - usando template nova_cotacao')
+      const result = await sendTemplate(telefone, 'nova_cotacao', [nomeRep])
+      return { via: 'template', ...result }
+    }
+    throw err
+  }
+}
