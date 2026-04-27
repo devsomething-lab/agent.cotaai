@@ -91,7 +91,7 @@ RETORNE APENAS JSON, sem texto adicional:
   if (!content.length) throw new Error('Nenhum conteúdo para processar')
 
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-sonnet-4-5',
     max_tokens: 4096,
     system,
     messages: [{ role: 'user', content }],
@@ -153,7 +153,7 @@ RETORNE APENAS JSON:
 }`
 
   const resp = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-sonnet-4-5',
     max_tokens: 512,
     system,
     messages: [{ role: 'user', content: 'Mapeie as colunas desta planilha.' }],
@@ -199,7 +199,7 @@ export async function classificarMensagemRep(texto) {
 RETORNE APENAS UMA PALAVRA: catalogo | cotacao | promocao | outro`
 
   const resp = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-sonnet-4-5',
     max_tokens: 10,
     system,
     messages: [{ role: 'user', content: texto }],
