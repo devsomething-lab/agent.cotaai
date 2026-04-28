@@ -9,6 +9,7 @@ import { upsertCatalogoEmLote, salvarPromocao } from '../db/catalogo.js'
 import { sendText, sendTextOrTemplate, downloadMedia, normalizeMetaPayload,
          templateCotacaoParaRep, templateComparativo, templatePedidoConfirmado } from '../services/whatsapp.js'
 import * as XLSX from 'xlsx'
+import { handleAutocadastro, getSessaoOnboarding } from './onboarding.js'
 import 'dotenv/config'
 
 const TIMEOUT_HORAS = parseInt(process.env.COTACAO_TIMEOUT_HORAS ?? '24')
@@ -24,6 +25,16 @@ export async function handleWebhook(payload) {
 
   console.log(`[webhook] ${phone} | tipo: ${type} | "${(message ?? '').slice(0, 60)}"`)
 
+  // Verifica se esta em processo de auto-cadastro
+  const sessaoAtiva = await getSessaoOnboarding(phone)
+  if (sessaoAtiva) return handleAutocadastro(phone, message)
+
+  // Verifica keyword CADASTRO
+  const msgLower = (message ?? '').trim().toLowerCase()
+  if ((msgLower === 'cadastro' || msgLower === 'cadastrar') && !await findRepresentanteByTelefone(phone)) {
+    return handleAutocadastro(phone, message)
+  }
+
   const rep = await findRepresentanteByTelefone(phone)
   if (rep) {
     return handleMensagemRepresentante({ rep, message, type, mediaId, mimeType })
@@ -35,6 +46,12 @@ export async function handleWebhook(payload) {
 // ── FLUXO DO COMERCIANTE ─────────────────────────────────────────────
 
 async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeType }) {
+  const msgLower = (message ?? '').trim().toLowerCase()
+  const palavrasGenericas = ['oi', 'ola', 'olá', 'bom dia', 'boa tarde', 'boa noite', 'hi', 'hello', 'teste', 'ok']
+  if (palavrasGenericas.some(p => msgLower === p) && type === 'texto') {
+    await sendText(phone, '👋 Olá! Bem-vindo ao *Kota*.\n\nComo posso te ajudar?\n\n📦 *Sou comerciante* — envie sua lista de produtos para cotar\n🤝 *Sou representante* — envie *CADASTRO* para se registrar')
+    return { ok: true }
+  }
   const comerciante = await findOrCreateComercianteByTelefone(phone)
 
   // Cotação aguardando escolha de fornecedor?
