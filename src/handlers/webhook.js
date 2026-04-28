@@ -9,7 +9,7 @@ import { upsertCatalogoEmLote, salvarPromocao } from '../db/catalogo.js'
 import { sendText, sendTextOrTemplate, downloadMedia, normalizeMetaPayload,
          templateCotacaoParaRep, templateComparativo, templatePedidoConfirmado } from '../services/whatsapp.js'
 import * as XLSX from 'xlsx'
-import { handleAutocadastro, getSessaoOnboarding } from './onboarding.js'
+import { handleAutocadastro, getSessaoOnboarding, handleOnboardingComerciantge, getSessaoOnboardingComerciantge } from './onboarding.js'
 import 'dotenv/config'
 
 const TIMEOUT_HORAS = parseInt(process.env.COTACAO_TIMEOUT_HORAS ?? '24')
@@ -22,18 +22,6 @@ export async function handleWebhook(payload) {
 
   const { phone, message, type, mediaId, mimeType } = normalized
   if (!phone || (!message && !mediaId)) return { ok: true, skipped: true }
-
-  // Deduplicação por ID de mensagem
-  if (normalized.rawMsgId) {
-    const cacheKey = `msg_${normalized.rawMsgId}`
-    if (global._processedMsgs?.has(cacheKey)) {
-      console.log(`[webhook] msg ${normalized.rawMsgId} ja processada — ignorando`)
-      return { ok: true, skipped: true }
-    }
-    if (!global._processedMsgs) global._processedMsgs = new Set()
-    global._processedMsgs.add(cacheKey)
-    setTimeout(() => global._processedMsgs?.delete(cacheKey), 300000) // expira em 5min
-  }
 
   console.log(`[webhook] ${phone} | tipo: ${type} | "${(message ?? '').slice(0, 60)}"`)
 
@@ -56,9 +44,31 @@ export async function handleWebhook(payload) {
   const rep = await findRepresentanteByTelefone(phone)
   if (rep) {
     return handleMensagemRepresentante({ rep, message, type, mediaId, mimeType })
-  } else {
-    return handleMensagemComerciantge({ phone, message, type, mediaId, mimeType })
   }
+
+  // 4. Verifica onboarding do comerciante
+  const sessaoComerciantge = await getSessaoOnboardingComerciantge(phone)
+  if (sessaoComerciantge) {
+    return handleOnboardingComerciantge(phone, message)
+  }
+
+  // 5. Comerciante existente ou novo
+  const { data: comercianteExistente } = await supabase
+    .from('comerciantes')
+    .select('id, nome, empresa')
+    .eq('telefone', phone)
+    .single()
+
+  if (!comercianteExistente || !comercianteExistente.empresa) {
+    // Novo comerciante ou sem cadastro completo — inicia onboarding
+    if (!comercianteExistente) {
+      // Cria o registro primeiro
+      await supabase.from('comerciantes').insert({ telefone: phone, nome: phone })
+    }
+    return handleOnboardingComerciantge(phone, message)
+  }
+
+  return handleMensagemComerciantge({ phone, message, type, mediaId, mimeType })
 }
 
 // ── Mensagem de boas-vindas para números desconhecidos ────────────────
@@ -99,7 +109,8 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
       '',
       'Envie sua lista para cotar produtos.',
       'Representante? Envie *CADASTRO*.',
-    ].join('\n'))
+    ].join('
+'))
     return { ok: true }
   }
 
@@ -143,7 +154,8 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
         '',
         'Quando quiser comprar, é só enviar *comprar* que retomo a cotação.',
         'Ou envie uma nova lista quando precisar cotar novamente.',
-      ].join('\n'))
+      ].join('
+'))
       return { ok: true }
     }
     if (cmd === '3' || cmd === 'decidir depois' || cmd === 'depois') {
@@ -151,7 +163,8 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
         'Ok! Sua cotação fica salva por 7 dias.',
         '',
         'Quando quiser retomar, envie *comprar* ou *minha cotação*.',
-      ].join('\n'))
+      ].join('
+'))
       return { ok: true }
     }
     // Número ou nome — é escolha de fornecedor
@@ -196,7 +209,8 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
       'O que deseja fazer?',
       '1. Ver cotação em aberto',
       '2. Iniciar nova cotação',
-    ].join('\n'))
+    ].join('
+'))
     // Salva intenção de nova cotação temporariamente
     await supabase.from('comerciantes').update({ 
       nome: comerciante.nome // trigger para salvar pending_message
@@ -506,22 +520,11 @@ async function verificarEConsolidar(cotacaoId) {
 }
 
 export async function consolidarEEnviar(cotacaoId) {
-  // Proteção contra execução dupla — só consolida se ainda está aguardando
-  const { data: check } = await supabase.from('cotacoes').select('status').eq('id', cotacaoId).single()
-  if (!check || !['aguardando_respostas', 'consolidando'].includes(check.status)) {
-    console.log(`[consolidar] cotacao ${cotacaoId} ja foi consolidada (status: ${check?.status}) — ignorando`)
-    return
-  }
-
-  // Marca como consolidando para evitar execução paralela
-  await supabase.from('cotacoes').update({ status: 'consolidando' }).eq('id', cotacaoId)
-
   const { cotacao, itens } = await getCotacaoComItens(cotacaoId)
   const propostas = await getPropostasDaCotacao(cotacaoId)
 
   if (!propostas.length) {
-    await supabase.from('cotacoes').update({ status: 'cancelada' }).eq('id', cotacaoId)
-    await sendText(cotacao.comerciantes.telefone, 'Nenhum fornecedor respondeu.')
+    await sendText(cotacao.comerciantes.telefone, 'Nenhum fornecedor respondeu. Tente novamente mais tarde.')
     return
   }
 

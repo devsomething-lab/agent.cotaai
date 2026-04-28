@@ -175,3 +175,86 @@ async function processarEtapa(telefone, sessao, message) {
       return null
   }
 }
+
+
+// ══════════════════════════════════════════════════════════════
+//  ONBOARDING DO COMERCIANTE
+// ══════════════════════════════════════════════════════════════
+
+export async function getSessaoOnboardingComerciantge(telefone) {
+  const { data } = await supabase
+    .from('onboarding_sessoes')
+    .select('*')
+    .eq('telefone', telefone)
+    .eq('tipo', 'comerciante')
+    .neq('etapa', 'concluido')
+    .single()
+  return data
+}
+
+export async function handleOnboardingComerciantge(telefone, message) {
+  const sessao = await getSessaoOnboardingComerciantge(telefone)
+
+  if (!sessao) {
+    return iniciarOnboardingComerciantge(telefone)
+  }
+  return processarEtapaComerciantge(telefone, sessao, message)
+}
+
+async function iniciarOnboardingComerciantge(telefone) {
+  await supabase.from('onboarding_sessoes').upsert({
+    telefone,
+    tipo: 'comerciante',
+    etapa: 'aguardando_nome',
+    atualizado_em: new Date().toISOString(),
+  }, { onConflict: 'telefone' })
+
+  await sendText(telefone, 'Kota\n\nOlá! Qual é o seu nome?')
+  return { ok: true, etapa: 'aguardando_nome' }
+}
+
+async function processarEtapaComerciantge(telefone, sessao, message) {
+  const texto = (message ?? '').trim()
+
+  switch (sessao.etapa) {
+    case 'aguardando_nome': {
+      if (texto.length < 2) {
+        await sendText(telefone, 'Informe seu nome para continuar.')
+        return { ok: true }
+      }
+      await supabase.from('onboarding_sessoes')
+        .update({ nome: texto, etapa: 'aguardando_empresa', atualizado_em: new Date().toISOString() })
+        .eq('telefone', telefone)
+      await sendText(telefone, `${texto}, qual é o nome da sua empresa?`)
+      return { ok: true }
+    }
+
+    case 'aguardando_empresa': {
+      if (texto.length < 2) {
+        await sendText(telefone, 'Informe o nome da sua empresa para continuar.')
+        return { ok: true }
+      }
+
+      const { data: s } = await supabase
+        .from('onboarding_sessoes')
+        .select('*')
+        .eq('telefone', telefone)
+        .single()
+
+      // Atualiza o comerciante com nome e empresa
+      await supabase.from('comerciantes')
+        .update({ nome: s.nome, empresa: texto })
+        .eq('telefone', telefone)
+
+      // Conclui o onboarding
+      await supabase.from('onboarding_sessoes')
+        .update({ empresa: texto, etapa: 'concluido', atualizado_em: new Date().toISOString() })
+        .eq('telefone', telefone)
+
+      await sendText(telefone, `${s.nome} · ${texto}\n\nCadastro concluído. Envie sua lista de produtos para cotar.`)
+      return { ok: true, etapa: 'concluido' }
+    }
+
+    default: return null
+  }
+}
