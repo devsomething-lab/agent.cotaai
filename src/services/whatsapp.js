@@ -184,3 +184,28 @@ export async function sendTextOrTemplate(telefone, texto, nomeRep) {
     throw err
   }
 }
+
+export function normalizeMetaPayload(body) {
+  try {
+    const value = body?.entry?.[0]?.changes?.[0]?.value
+    if (!value) return null
+    const msg = value?.messages?.[0]
+    if (!msg) return null
+    const phone = msg.from
+    const msgType = msg.type
+    let type = 'texto', message = null, mediaId = null, mimeType = null
+    switch (msgType) {
+      case 'text': type='texto'; message=msg.text?.body ?? null; break
+      case 'image': type='foto'; mediaId=msg.image?.id; mimeType=msg.image?.mime_type ?? 'image/jpeg'; message=msg.image?.caption ?? null; break
+      case 'audio': case 'voice': type='audio'; mediaId=msg.audio?.id ?? msg.voice?.id; mimeType='audio/ogg'; break
+      case 'document': {
+        const mime=msg.document?.mime_type ?? ''
+        type=mime.includes('pdf')?'pdf':mime.includes('sheet')||mime.includes('excel')?'planilha':'documento'
+        mediaId=msg.document?.id; mimeType=mime; message=msg.document?.caption ?? null; break
+      }
+      case 'interactive': type='texto'; message=msg.interactive?.button_reply?.title ?? msg.interactive?.list_reply?.title ?? null; break
+      default: type='texto'; message=msg.text?.body ?? null
+    }
+    return { phone, message, type, mediaId, mimeType, rawMsgId: msg.id }
+  } catch(err) { console.error('[normalizeMetaPayload]', err.message); return null }
+}
