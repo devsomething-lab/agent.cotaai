@@ -34,7 +34,7 @@ export async function sendText(telefone, texto) {
 // ── Envio com botões de resposta rápida (até 3 botões) ────────────────
 
 export async function sendButtons(telefone, texto, botoes) {
-  // botoes = [{ id: 'confirmar', label: '✅ Confirmar' }, ...]
+  // botoes = [{ id: 'confirmar', label: 'Confirmar' }, ...]
   // Meta suporta até 3 botões de resposta rápida
   const { data } = await meta.post(`/${PHONE_NUMBER_ID}/messages`, {
     messaging_product: 'whatsapp',
@@ -78,147 +78,107 @@ export async function downloadMedia(mediaId) {
 export function templateCotacaoParaRep(itens, cotacaoId) {
   const linhas = itens.map((it, i) => {
     const marca = it.marca ? ` (${it.marca})` : ''
-    const unidade = it.unidade ? ` – ${it.unidade}` : ''
-    return `${i + 1}. *${it.produto}*${marca}${unidade} — Qtd: ${it.quantidade ?? '?'}`
+    const unidade = it.unidade ? ` · ${it.unidade}` : ''
+    return `${i + 1}. ${it.produto}${marca}${unidade} · ${it.quantidade ?? 1}un`
   }).join('\n')
 
   return [
-    `📋 *Solicitação de Cotação #${cotacaoId.slice(-6).toUpperCase()}*`,
-    '',
-    'Prezado representante, solicito cotação dos itens abaixo:',
+    `*Kota · Cotação #${cotacaoId.slice(-6).toUpperCase()}*`,
     '',
     linhas,
     '',
-    '━━━━━━━━━━━━━━━━━━━━━━',
-    'Por favor, responda com os dados de *cada item*:',
-    '• Produto',
-    '• Preço unitário (R$)',
-    '• Prazo de pagamento (dias)',
-    '• Prazo de entrega (dias)',
-    '',
-    'Exemplo de resposta:',
-    '1. Coca-Cola 2L – R$ 5,80 – pgto 30d – entrega 2d',
-    '2. Leite Ninho 400g – R$ 12,50 – pgto 28d – entrega 2d',
-    '',
-    '⏰ Aguardo resposta em até 24h. Obrigado!',
+    'Responda no formato:',
+    '1. R$ 0,00 · Xd pgto · Xd entrega',
   ].join('\n')
 }
 
 export function templateComparativo(consolidado, cotacaoId) {
-  const { itensMelhorPreco, melhorFornecedor, propostas } = consolidado
-  
-  let msg = [
-    `📊 *Comparativo de Cotação #${cotacaoId.slice(-6).toUpperCase()}*`,
-    '',
-    '🏆 *Melhor fornecedor geral:*',
-    `   ${melhorFornecedor.nome} (${melhorFornecedor.empresa ?? ''}) — Score: ${(melhorFornecedor.score * 100).toFixed(0)}pts`,
-    '',
-    '📦 *Melhor preço por item:*',
-  ]
-
-  for (const item of itensMelhorPreco) {
-    msg.push(`  • ${item.produto}: R$ ${item.preco_unitario?.toFixed(2)} — ${item.representante}`)
-  }
-
-  msg.push('', '━━━━━━━━━━━━━━━━━━━━━━')
-  msg.push('*Propostas recebidas:*')
+  const { itensMelhorPreco, melhorFornecedor, rankingFornecedores, propostas } = consolidado
 
   const reps = [...new Set(propostas.map(p => p.representantes?.nome))]
-  for (const rep of reps) {
+
+  let msg = [
+    `*Kota · #${cotacaoId.slice(-6).toUpperCase()}*`,
+    '',
+  ]
+
+  // Bloco por fornecedor
+  reps.forEach((rep, i) => {
     const props = propostas.filter(p => p.representantes?.nome === rep)
     const total = props.reduce((s, p) => s + (p.preco_total ?? 0), 0)
-    const prazo_pg = props[0]?.prazo_pagamento_dias
-    const prazo_en = props[0]?.prazo_entrega_dias
-    msg.push(`\n🔹 *${rep}*`)
-    msg.push(`   Total: R$ ${total.toFixed(2)} | Pgto: ${prazo_pg ?? '?'}d | Entrega: ${prazo_en ?? '?'}d`)
-    for (const p of props) {
-      msg.push(`   - ${p.produto}: R$ ${p.preco_unitario?.toFixed(2)}`)
-    }
-  }
+    const pg = props[0]?.prazo_pagamento_dias
+    const en = props[0]?.prazo_entrega_dias
+    const score = rankingFornecedores?.find(r => r.nome === rep)?.score
+    const isMelhor = melhorFornecedor?.nome === rep
 
-  msg.push('')
-  msg.push('Qual fornecedor você escolhe? Responda com o *nome* ou *número* da opção.')
+    msg.push(`${isMelhor ? '🏆' : ''} *${i + 1}. ${rep}*${isMelhor ? ' — melhor oferta' : ''}`)
+    props.forEach(p => {
+      msg.push(`  ${p.produto} · R$ ${p.preco_unitario?.toFixed(2)}`)
+    })
+    msg.push(`  Total R$ ${total.toFixed(2)} · pgto ${pg ?? '?'}d · entrega ${en ?? '?'}d`)
+    msg.push('')
+  })
 
-  reps.forEach((r, i) => msg.push(`${i + 1}. ${r}`))
+  msg.push('1. Comprar agora')
+  msg.push('2. Só consultando')
+  msg.push('3. Decidir depois')
 
   return msg.join('\n')
 }
 
 export function templatePedidoConfirmado(pedido, itens, representante) {
   const linhas = itens.map(it =>
-    `  • ${it.produto} x${it.quantidade} — R$ ${it.preco_total?.toFixed(2)}`
+    `  ${it.produto} · ${it.quantidade}un · R$ ${it.preco_total?.toFixed(2)}`
   ).join('\n')
 
   return [
-    `✅ *Pedido #${pedido.id.slice(-6).toUpperCase()} confirmado!*`,
+    `*Kota · Pedido #${pedido.id.slice(-6).toUpperCase()}*`,
     '',
-    `Fornecedor: *${representante.nome}* (${representante.empresa ?? ''})`,
-    `Pagamento: ${pedido.prazo_pagamento_dias}d | Entrega: ${pedido.prazo_entrega_dias}d`,
-    '',
-    '*Itens:*',
     linhas,
     '',
-    `*Total: R$ ${pedido.valor_total?.toFixed(2)}*`,
-    '',
-    'O representante foi notificado. Aguarde a confirmação de recebimento.',
+    `Total R$ ${pedido.valor_total?.toFixed(2)}`,
+    `${representante.nome} · pgto ${pedido.prazo_pagamento_dias}d · entrega ${pedido.prazo_entrega_dias}d`,
   ].join('\n')
 }
 
-// ── Normaliza payload da Meta Cloud API ──────────────────────────────
-export function normalizeMetaPayload(body) {
-  try {
-    const value = body?.entry?.[0]?.changes?.[0]?.value
-    if (!value) return null
-    const msg = value?.messages?.[0]
-    if (!msg) return null
-    const phone = msg.from
-    const msgType = msg.type
-    let type = 'texto', message = null, mediaId = null, mimeType = null
-    switch (msgType) {
-      case 'text': type='texto'; message=msg.text?.body ?? null; break
-      case 'image': type='foto'; mediaId=msg.image?.id; mimeType=msg.image?.mime_type ?? 'image/jpeg'; message=msg.image?.caption ?? null; break
-      case 'audio': case 'voice': type='audio'; mediaId=msg.audio?.id ?? msg.voice?.id; mimeType='audio/ogg'; break
-      case 'document': {
-        const mime=msg.document?.mime_type ?? ''
-        type=mime.includes('pdf')?'pdf':mime.includes('sheet')||mime.includes('excel')?'planilha':'documento'
-        mediaId=msg.document?.id; mimeType=mime; message=msg.document?.caption ?? null; break
-      }
-      case 'interactive': type='texto'; message=msg.interactive?.button_reply?.title ?? msg.interactive?.list_reply?.title ?? null; break
-      default: type='texto'; message=msg.text?.body ?? null
-    }
-    return { phone, message, type, mediaId, mimeType, rawMsgId: msg.id }
-  } catch(err) { console.error('[normalizeMetaPayload]', err.message); return null }
-}
-
+// ── Envio de template aprovado pela Meta ─────────────────────────────
 export async function sendTemplate(telefone, templateName, params = []) {
   const components = params.length ? [{
     type: 'body',
     parameters: params.map(p => ({ type: 'text', text: String(p) })),
   }] : []
+
   try {
     const { data } = await meta.post(`/${PHONE_NUMBER_ID}/messages`, {
       messaging_product: 'whatsapp',
       recipient_type: 'individual',
       to: telefone,
       type: 'template',
-      template: { name: templateName, language: { code: 'pt_BR' }, components },
+      template: {
+        name: templateName,
+        language: { code: 'pt_BR' },
+        components,
+      },
     })
     return { ok: true, data }
   } catch (err) {
-    console.error('[sendTemplate] erro:', err.response?.data ?? err.message)
+    console.error(`[sendTemplate] erro para ${telefone}:`, err.response?.data ?? err.message)
     return { ok: false, error: err.response?.data }
   }
 }
 
+// ── Envio com fallback automático ─────────────────────────────────────
+// Tenta texto livre; se falhar por janela fechada, usa o template
 export async function sendTextOrTemplate(telefone, texto, nomeRep) {
   try {
     await sendText(telefone, texto)
     return { via: 'text' }
   } catch (err) {
     const code = err.response?.data?.error?.code
+    // 131047 = fora da janela 24h | 131026 = número não opt-in
     if (code === 131047 || code === 131026) {
-      console.log('[whatsapp] janela fechada - usando template nova_cotacao')
-      const result = await sendTemplate(telefone, 'nova_cotacao', [nomeRep])
+      console.log(`[whatsapp] janela fechada para ${telefone} — usando template`)
+      const result = await sendTemplate(telefone, 'cotacao_nova', [nomeRep])
       return { via: 'template', ...result }
     }
     throw err

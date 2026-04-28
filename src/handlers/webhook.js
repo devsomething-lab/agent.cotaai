@@ -25,16 +25,22 @@ export async function handleWebhook(payload) {
 
   console.log(`[webhook] ${phone} | tipo: ${type} | "${(message ?? '').slice(0, 60)}"`)
 
-  // Verifica se esta em processo de auto-cadastro
+  // 1. Verifica se está em processo de auto-cadastro
   const sessaoAtiva = await getSessaoOnboarding(phone)
-  if (sessaoAtiva) return handleAutocadastro(phone, message)
-
-  // Verifica keyword CADASTRO
-  const msgLower = (message ?? '').trim().toLowerCase()
-  if ((msgLower === 'cadastro' || msgLower === 'cadastrar') && !await findRepresentanteByTelefone(phone)) {
+  if (sessaoAtiva) {
     return handleAutocadastro(phone, message)
   }
 
+  // 2. Verifica se é keyword de cadastro
+  const msgLower = (message ?? '').trim().toLowerCase()
+  if (msgLower === 'cadastro' || msgLower === 'cadastrar') {
+    const rep = await findRepresentanteByTelefone(phone)
+    if (!rep) {
+      return handleAutocadastro(phone, message)
+    }
+  }
+
+  // 3. Rota normal: representante ou comerciante
   const rep = await findRepresentanteByTelefone(phone)
   if (rep) {
     return handleMensagemRepresentante({ rep, message, type, mediaId, mimeType })
@@ -43,19 +49,68 @@ export async function handleWebhook(payload) {
   }
 }
 
+// ── Mensagem de boas-vindas para números desconhecidos ────────────────
+// Chamada quando número não é rep nem está em onboarding
+
+export async function handleNumeroDesconhecido(phone, message) {
+  // Se parece uma lista de produtos (tem número + produto), trata como comerciante
+  const pareceListaProdutos = /\d+.*(?:cx|caixa|fardo|kg|un|pct|lt|gf|pacote|unidade)/i.test(message ?? '')
+  if (pareceListaProdutos || (message ?? '').length > 30) {
+    return null // deixa o fluxo de comerciante tratar
+  }
+
+  // Mensagem curta e genérica — orienta sobre as opções
+  await sendText(phone, [
+    'Olá! Bem-vindo ao *Kota*.',
+    '',
+    'Sou um assistente de cotações. Como posso te ajudar?',
+    '',
+    '*Sou comerciante* — envie sua lista de produtos para cotar',
+    '*Sou representante* — envie *CADASTRO* para se registrar',
+  ].join('\n'))
+
+  return { ok: true, skipped: true }
+}
+
 // ── FLUXO DO COMERCIANTE ─────────────────────────────────────────────
 
 async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeType }) {
+  // Se mensagem curta e genérica, orienta sobre cadastro vs cotação
   const msgLower = (message ?? '').trim().toLowerCase()
-  const palavrasGenericas = ['oi', 'ola', 'olá', 'bom dia', 'boa tarde', 'boa noite', 'hi', 'hello', 'teste', 'ok']
-  if (palavrasGenericas.some(p => msgLower === p) && type === 'texto') {
-    await sendText(phone, '👋 Olá! Bem-vindo ao *Kota*.\n\nComo posso te ajudar?\n\n📦 *Sou comerciante* — envie sua lista de produtos para cotar\n🤝 *Sou representante* — envie *CADASTRO* para se registrar')
+  const msgCurta = (message ?? '').trim().length < 15
+  const palavrasGenericas = ['oi', 'olá', 'ola', 'bom dia', 'boa tarde', 'boa noite', 'hi', 'hello', 'teste', 'test']
+  const isGenerica = palavrasGenericas.some(p => msgLower === p || msgLower.startsWith(p + ' '))
+
+  if (msgCurta && isGenerica && type === 'texto') {
+    await sendText(phone, [
+      '*Kota*',
+      '',
+      'Envie sua lista para cotar produtos.',
+      'Representante? Envie *CADASTRO*.',
+    ].join('
+'))
     return { ok: true }
   }
+
   const comerciante = await findOrCreateComercianteByTelefone(phone)
 
-  // Cotação aguardando escolha de fornecedor?
-  const { data: cotacaoAberta } = await supabase
+  // ── Comandos naturais ──────────────────────────────────────────────
+  const cmd = msgLower.trim()
+
+  if (cmd === 'minha cotacao' || cmd === 'minha cotação' || cmd === 'cotacao' || cmd === 'cotação') {
+    return handleVerCotacaoAtual(comerciante, phone)
+  }
+
+  if (cmd === 'cancelar' || cmd === 'cancelar cotacao' || cmd === 'cancelar cotação') {
+    return handleCancelarCotacao(comerciante, phone)
+  }
+
+  if (cmd === 'historico' || cmd === 'histórico') {
+    return handleHistorico(comerciante, phone)
+  }
+
+  // ── Cotação aguardando escolha (modo compra) ──────────────────────
+  const { data: cotacaoAguardandoEscolha } = await supabase
     .from('cotacoes')
     .select('*')
     .eq('comerciante_id', comerciante.id)
@@ -64,11 +119,88 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
     .limit(1)
     .single()
 
-  if (cotacaoAberta && message) {
-    return handleEscolhaFornecedor({ comerciante, cotacao: cotacaoAberta, resposta: message })
+  if (cotacaoAguardandoEscolha && message) {
+    // Verifica se é resposta de intenção (1, 2, 3) ou escolha de fornecedor
+    if (cmd === '1' || cmd === 'comprar' || cmd === 'comprar agora') {
+      // Reenvia o comparativo para o comerciante escolher o fornecedor
+      return handleReenviarComparativo(comerciante, cotacaoAguardandoEscolha, phone)
+    }
+    if (cmd === '2' || cmd === 'so consulta' || cmd === 'só consulta' || cmd === 'consultando') {
+      await supabase.from('cotacoes').update({ status: 'consulta' }).eq('id', cotacaoAguardandoEscolha.id)
+      await sendText(phone, [
+        'Entendido! Seus preços foram salvos para consulta.',
+        '',
+        'Quando quiser comprar, é só enviar *comprar* que retomo a cotação.',
+        'Ou envie uma nova lista quando precisar cotar novamente.',
+      ].join('
+'))
+      return { ok: true }
+    }
+    if (cmd === '3' || cmd === 'decidir depois' || cmd === 'depois') {
+      await sendText(phone, [
+        'Ok! Sua cotação fica salva por 7 dias.',
+        '',
+        'Quando quiser retomar, envie *comprar* ou *minha cotação*.',
+      ].join('
+'))
+      return { ok: true }
+    }
+    // Número ou nome — é escolha de fornecedor
+    if (/^\d+$/.test(cmd) || cmd.length > 3) {
+      return handleEscolhaFornecedor({ comerciante, cotacao: cotacaoAguardandoEscolha, resposta: message })
+    }
   }
 
-  await sendText(phone, '🔄 Recebi sua lista! Processando... aguarde um instante.')
+  // ── Cotação em modo consulta — pode reativar ──────────────────────
+  if (cmd === 'comprar') {
+    const { data: cotacaoConsulta } = await supabase
+      .from('cotacoes')
+      .select('*')
+      .eq('comerciante_id', comerciante.id)
+      .eq('status', 'consulta')
+      .order('criado_em', { ascending: false })
+      .limit(1)
+      .single()
+
+    if (cotacaoConsulta) {
+      await supabase.from('cotacoes').update({ status: 'aguardando_escolha' }).eq('id', cotacaoConsulta.id)
+      return handleReenviarComparativo(comerciante, cotacaoConsulta, phone)
+    }
+  }
+
+  // ── Nova lista com cotação pendente ──────────────────────────────
+  const { data: cotacaoPendente } = await supabase
+    .from('cotacoes')
+    .select('*')
+    .eq('comerciante_id', comerciante.id)
+    .in('status', ['aguardando_respostas', 'aguardando_escolha', 'consulta'])
+    .order('criado_em', { ascending: false })
+    .limit(1)
+    .single()
+
+  if (cotacaoPendente && (message?.length > 10 || mediaId)) {
+    const statusLabel = cotacaoPendente.status === 'aguardando_respostas' ? 'aguardando respostas' :
+                        cotacaoPendente.status === 'aguardando_escolha' ? 'comparativo pronto' : 'salva para consulta'
+    await sendText(phone, [
+      `Você tem uma cotação em aberto *#${cotacaoPendente.id.slice(-6).toUpperCase()}* (${statusLabel}).`,
+      '',
+      'O que deseja fazer?',
+      '1. Ver cotação em aberto',
+      '2. Iniciar nova cotação',
+    ].join('
+'))
+    // Salva intenção de nova cotação temporariamente
+    await supabase.from('comerciantes').update({ 
+      nome: comerciante.nome // trigger para salvar pending_message
+    }).eq('id', comerciante.id)
+    // Armazena mensagem pendente no banco
+    await supabase.from('cotacoes').update({ 
+      obs_interna: message ?? `[${type}]`
+    }).eq('id', cotacaoPendente.id).is('obs_interna', null)
+    return { ok: true }
+  }
+
+  await sendText(phone, 'Processando...')
 
   // Parse de planilha antes da IA
   let mensagemParaIA = { tipo: type, texto: message ?? null, mediaId: mediaId ?? null, mimeType }
@@ -94,7 +226,7 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
   try {
     extraido = await extrairListaProdutos(mensagemParaIA)
   } catch (err) {
-    await sendText(phone, '⚠️ Não consegui interpretar sua lista. Tente em texto: "2 cx Coca-Cola 2L, 1 fardo Leite Ninho"')
+    await sendText(phone, 'Não consegui interpretar sua lista. Tente em texto: "2 cx Coca-Cola 2L, 1 fardo Leite Ninho"')
     return { ok: false }
   }
 
@@ -133,7 +265,7 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
     return `${i + 1}. ${it.produto}${marca}${un} × ${it.quantidade ?? 1}`
   }).join('\n')
 
-  await sendText(phone, [`✅ *Entendi sua lista:*`, '', resumo, '', '🔍 Verificando catálogos dos representantes...'].join('\n'))
+  await sendText(phone, [`*Entendi sua lista:*`, '', resumo, '', 'Verificando catálogos dos representantes...'].join('\n'))
 
   // ── Tenta cotação automática ──────────────────────────────────────
   const { repsAutomaticos, repsManuais, itensSemCobertura, modo } =
@@ -146,21 +278,21 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
 
   if (modo === 'automatico') {
     // Todos os reps têm catálogo — consolida já
-    await sendText(phone, '⚡ Todos os fornecedores têm catálogo atualizado. Comparativo pronto em segundos!')
+    await sendText(phone, 'Todos os fornecedores têm catálogo atualizado. Comparativo pronto em segundos!')
     await consolidarEEnviar(cotacao.id)
   } else {
     // Misto ou manual — avisa o que está acontecendo
-    const msgs = ['📤 Consultando fornecedores:']
+    const msgs = ['Consultando fornecedores:']
     if (repsAutomaticos.length) {
-      msgs.push(`✅ ${repsAutomaticos.length} fornecedor(es) com catálogo responderam automaticamente`)
+      msgs.push(`${repsAutomaticos.length} fornecedor(es) com catálogo responderam automaticamente`)
     }
     if (repsManuais.length) {
-      msgs.push(`⏳ ${repsManuais.length} fornecedor(es) sem catálogo serão consultados via WhatsApp`)
+      msgs.push(`${repsManuais.length} fornecedor(es) sem catálogo serão consultados via WhatsApp`)
       // Dispara para os reps sem catálogo
       await dispararParaRepsManuais(cotacao, itens, repsManuais)
     }
     if (itensSemCobertura.length) {
-      msgs.push(`⚠️ ${itensSemCobertura.length} item(ns) sem cobertura em nenhum catálogo`)
+      msgs.push(`${itensSemCobertura.length} item(ns) sem cobertura em nenhum catálogo`)
     }
     msgs.push(``, `⏰ Consolidarei as respostas em até ${TIMEOUT_HORAS}h.`)
     await sendText(phone, msgs.join('\n'))
@@ -190,7 +322,7 @@ async function dispararParaRepsManuais(cotacao, itens, reps) {
 async function handleMensagemRepresentante({ rep, message, type, mediaId, mimeType }) {
   // Sem texto e sem mídia → pede formato correto
   if (!message && !mediaId) {
-    await sendText(rep.telefone, '📝 Envie sua tabela de preços (Excel, PDF, foto) ou responda a cotação em texto.')
+    await sendText(rep.telefone, 'Envie sua tabela de preços (Excel, PDF, foto) ou responda a cotação em texto.')
     return { ok: true }
   }
 
@@ -223,21 +355,21 @@ async function handleAtualizacaoCatalogo({ rep, message, type, mediaId, mimeType
     const extraido = await extrairCatalogo({ tipo: type, texto: message, mediaId, mimeType })
 
     if (!extraido.itens?.length) {
-      await sendText(rep.telefone, '⚠️ Não encontrei produtos com preços. Envie uma planilha Excel ou lista no formato:\nProduto – R$ X,XX – pgto Xd – entrega Xd')
+      await sendText(rep.telefone, 'Não encontrei produtos com preços. Envie uma planilha Excel ou lista no formato:\nProduto – R$ X,XX – pgto Xd – entrega Xd')
       return { ok: false }
     }
 
     const resultado = await upsertCatalogoEmLote(rep.id, extraido.itens, type === 'texto' ? 'whatsapp' : type)
 
     const msgs = [
-      `✅ *Catálogo atualizado!*`,
+      `*Catálogo atualizado!*`,
       ``,
-      `📦 ${resultado.inseridos} produto(s) novo(s) adicionados`,
-      `🔄 ${resultado.atualizados} produto(s) com preço atualizado`,
+      `${resultado.inseridos} produto(s) novo(s) adicionados`,
+      `${resultado.atualizados} produto(s) com preço atualizado`,
     ]
 
     if (resultado.erros.length) {
-      msgs.push(`⚠️ ${resultado.erros.length} item(ns) com erro — não foram salvos`)
+      msgs.push(`${resultado.erros.length} item(ns) com erro — não foram salvos`)
     }
 
     msgs.push(``, `Seus preços serão usados automaticamente nas próximas cotações. 🚀`)
@@ -247,7 +379,7 @@ async function handleAtualizacaoCatalogo({ rep, message, type, mediaId, mimeType
 
   } catch (err) {
     console.error('[catalogo] erro:', err.message)
-    await sendText(rep.telefone, '⚠️ Erro ao processar sua tabela. Tente enviar um arquivo Excel (.xlsx) ou liste os produtos em texto.')
+    await sendText(rep.telefone, 'Erro ao processar sua tabela. Tente enviar um arquivo Excel (.xlsx) ou liste os produtos em texto.')
     return { ok: false }
   }
 }
@@ -279,7 +411,7 @@ async function handlePromocao({ rep, message }) {
     }
 
     await sendText(rep.telefone, [
-      `🎉 *Promoção salva!*`,
+      `*Promoção salva!*`,
       `${extraido.itens.length} produto(s) com preço promocional ativo.`,
       `Será usado automaticamente nas próximas cotações!`,
     ].join('\n'))
@@ -287,7 +419,7 @@ async function handlePromocao({ rep, message }) {
     return { ok: true }
   } catch (err) {
     console.error('[promocao] erro:', err.message)
-    await sendText(rep.telefone, '⚠️ Erro ao salvar promoção. Tente no formato:\nProduto – R$ XX – válido até DD/MM')
+    await sendText(rep.telefone, 'Erro ao salvar promoção. Tente no formato:\nProduto – R$ XX – válido até DD/MM')
     return { ok: false }
   }
 }
@@ -296,7 +428,7 @@ async function handlePromocao({ rep, message }) {
 
 async function handleRespostaCotacao({ rep, message }) {
   if (!message) {
-    await sendText(rep.telefone, '📝 Para responder a cotação, envie os preços em texto.')
+    await sendText(rep.telefone, 'Para responder a cotação, envie os preços em texto.')
     return { ok: true }
   }
 
@@ -317,7 +449,7 @@ async function handleRespostaCotacao({ rep, message }) {
   try {
     estruturado = await estruturarRespostaRep(message, itens)
   } catch (err) {
-    await sendText(rep.telefone, '⚠️ Não entendi sua proposta. Formato esperado:\n1. Produto – R$ 0,00 – pgto Xd – entrega Xd')
+    await sendText(rep.telefone, 'Não entendi sua proposta. Formato esperado:\n1. Produto – R$ 0,00 – pgto Xd – entrega Xd')
     return { ok: false }
   }
 
@@ -346,7 +478,7 @@ async function handleRespostaCotacao({ rep, message }) {
     .update({ status: 'respondido', modo_resposta: 'manual', respondido_em: new Date().toISOString() })
     .eq('id', envio.id)
 
-  await sendText(rep.telefone, '✅ Proposta recebida! Obrigado. Se você for escolhido, o pedido chegará em seguida.')
+  await sendText(rep.telefone, 'Proposta recebida! Obrigado. Se você for escolhido, o pedido chegará em seguida.')
 
   await verificarEConsolidar(cotacaoId)
   return { ok: true }
@@ -370,7 +502,7 @@ export async function consolidarEEnviar(cotacaoId) {
   const propostas = await getPropostasDaCotacao(cotacaoId)
 
   if (!propostas.length) {
-    await sendText(cotacao.comerciantes.telefone, '⚠️ Nenhum fornecedor respondeu. Tente novamente mais tarde.')
+    await sendText(cotacao.comerciantes.telefone, 'Nenhum fornecedor respondeu. Tente novamente mais tarde.')
     return
   }
 
@@ -382,7 +514,8 @@ export async function consolidarEEnviar(cotacaoId) {
   }
 
   await supabase.from('cotacoes').update({ status: 'aguardando_escolha' }).eq('id', cotacaoId)
-  await sendText(cotacao.comerciantes.telefone, templateComparativo(consolidado, cotacaoId))
+  const msgComparativo = templateComparativoComIntencao(consolidado, cotacaoId)
+  await sendText(cotacao.comerciantes.telefone, msgComparativo)
 }
 
 // ── Escolha do fornecedor → Pedido ────────────────────────────────────
@@ -434,7 +567,7 @@ async function handleEscolhaFornecedor({ comerciante, cotacao, resposta }) {
 
   const resumo = pedidoItens.map(it => `• ${it.produto} ×${it.quantidade} — R$ ${it.preco_total?.toFixed(2)}`).join('\n')
   await sendText(repEscolhido.telefone, [
-    `🎉 *Pedido #${pedido.id.slice(-6).toUpperCase()} recebido!*`, '',
+    `*Pedido #${pedido.id.slice(-6).toUpperCase()} recebido!*`, '',
     `Cliente: ${comerciante.nome} (${comerciante.telefone})`, '',
     resumo, '',
     `*Total: R$ ${valorTotal.toFixed(2)}*`,
@@ -445,3 +578,151 @@ async function handleEscolhaFornecedor({ comerciante, cotacao, resposta }) {
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
+
+
+// ── Ver cotação atual ─────────────────────────────────────────────────
+async function handleVerCotacaoAtual(comerciante, phone) {
+  const { data: cotacao } = await supabase
+    .from('cotacoes')
+    .select('*')
+    .eq('comerciante_id', comerciante.id)
+    .in('status', ['aguardando_respostas', 'aguardando_escolha', 'consulta'])
+    .order('criado_em', { ascending: false })
+    .limit(1)
+    .single()
+
+  if (!cotacao) {
+    await sendText(phone, 'Você não tem nenhuma cotação em aberto no momento.\n\nEnvie uma lista de produtos para iniciar uma nova cotação.')
+    return { ok: true }
+  }
+
+  const statusMsg = {
+    aguardando_respostas: 'Aguardando respostas dos fornecedores',
+    aguardando_escolha:   '📊 Comparativo pronto — aguardando sua escolha',
+    consulta:             'Salva para consulta',
+  }[cotacao.status] ?? cotacao.status
+
+  const itensCotacao = await supabase.from('cotacao_itens').select('*').eq('cotacao_id', cotacao.id).order('ordem')
+
+  const itensStr = (itensCotacao.data ?? []).map((it, i) => 
+    `${i+1}. ${it.produto}${it.marca ? ` (${it.marca})` : ''} × ${it.quantidade ?? 1}`
+  ).join('\n')
+
+  await sendText(phone, [
+    `*Cotação #${cotacao.id.slice(-6).toUpperCase()}*`,
+    `Status: ${statusMsg}`,
+    `Data: ${new Date(cotacao.criado_em).toLocaleDateString('pt-BR')}`,
+    '',
+    '*Itens:*',
+    itensStr,
+    '',
+    cotacao.status === 'aguardando_escolha' ? 'Envie *comprar* para ver o comparativo e fechar o pedido.' :
+    cotacao.status === 'consulta' ? 'Envie *comprar* para retomar e fechar o pedido.' :
+    'Aguarde as respostas dos fornecedores.',
+  ].join('\n'))
+
+  return { ok: true }
+}
+
+// ── Cancelar cotação ──────────────────────────────────────────────────
+async function handleCancelarCotacao(comerciante, phone) {
+  const { data: cotacao } = await supabase
+    .from('cotacoes')
+    .select('*')
+    .eq('comerciante_id', comerciante.id)
+    .in('status', ['aguardando_respostas', 'aguardando_escolha', 'consulta'])
+    .order('criado_em', { ascending: false })
+    .limit(1)
+    .single()
+
+  if (!cotacao) {
+    await sendText(phone, 'Você não tem nenhuma cotação em aberto para cancelar.')
+    return { ok: true }
+  }
+
+  await supabase.from('cotacoes').update({ status: 'cancelada', fechado_em: new Date().toISOString() }).eq('id', cotacao.id)
+  await sendText(phone, `Cotação *#${cotacao.id.slice(-6).toUpperCase()}* cancelada.\n\nEnvie uma nova lista quando quiser cotar novamente.`)
+  return { ok: true }
+}
+
+// ── Histórico de cotações ─────────────────────────────────────────────
+async function handleHistorico(comerciante, phone) {
+  const { data: cotacoes } = await supabase
+    .from('cotacoes')
+    .select('*')
+    .eq('comerciante_id', comerciante.id)
+    .order('criado_em', { ascending: false })
+    .limit(5)
+
+  if (!cotacoes?.length) {
+    await sendText(phone, 'Você ainda não fez nenhuma cotação.')
+    return { ok: true }
+  }
+
+  const statusEmoji = {
+    pedido_gerado: '✅', aguardando_escolha: '📊', aguardando_respostas: '⏳',
+    consulta: '🔍', cancelada: '❌'
+  }
+
+  const linhas = cotacoes.map(c => 
+    `${statusEmoji[c.status] ?? '•'} *#${c.id.slice(-6).toUpperCase()}* — ${new Date(c.criado_em).toLocaleDateString('pt-BR')} — ${c.input_raw?.slice(0, 40) ?? ''}...`
+  ).join('\n')
+
+  await sendText(phone, `*Suas últimas cotações:*\n\n${linhas}\n\nEnvie *minha cotação* para ver detalhes da cotação em aberto.`)
+  return { ok: true }
+}
+
+// ── Reenviar comparativo para o comerciante retomar ───────────────────
+async function handleReenviarComparativo(comerciante, cotacao, phone) {
+  const { itens } = await getCotacaoComItens(cotacao.id)
+  const propostas = await getPropostasDaCotacao(cotacao.id)
+
+  if (!propostas?.length) {
+    await sendText(phone, 'Ainda não há propostas para esta cotação.')
+    return { ok: true }
+  }
+
+  const consolidado = consolidarPropostas(itens, propostas)
+  const msg = templateComparativoComIntencao(consolidado, cotacao.id)
+  await sendText(phone, msg)
+  return { ok: true }
+}
+
+// ── Template comparativo com pergunta de intenção ─────────────────────
+function templateComparativoComIntencao(consolidado, cotacaoId) {
+  const { itensMelhorPreco, melhorFornecedor, rankingFornecedores, propostas } = consolidado
+
+  let msg = [
+    `📊 *Comparativo — Cotação #${cotacaoId.slice(-6).toUpperCase()}*`, '',
+    `*Melhor fornecedor geral:*`,
+    `   ${melhorFornecedor.nome} (${melhorFornecedor.empresa ?? ''}) — Score: ${(melhorFornecedor.score * 100).toFixed(0)}pts`,
+    '', `*Melhor preço por item:*`,
+  ]
+
+  for (const item of itensMelhorPreco) {
+    msg.push(`  • ${item.produto}: R$ ${item.preco_unitario?.toFixed(2)} — ${item.representante}`)
+  }
+
+  msg.push('', '—', '*Propostas recebidas:*')
+
+  const reps = [...new Set(propostas.map(p => p.representantes?.nome))]
+  for (const rep of reps) {
+    const props = propostas.filter(p => p.representantes?.nome === rep)
+    const total = props.reduce((s, p) => s + (p.preco_total ?? 0), 0)
+    const pg = props[0]?.prazo_pagamento_dias
+    const en = props[0]?.prazo_entrega_dias
+    msg.push(`\n*${rep}*`)
+    msg.push(`   Total: R$ ${total.toFixed(2)} | Pgto: ${pg ?? '?'}d | Entrega: ${en ?? '?'}d`)
+    for (const p of props) {
+      msg.push(`   - ${p.produto}: R$ ${p.preco_unitario?.toFixed(2)}`)
+    }
+  }
+
+  msg.push('', '—')
+  msg.push('O que deseja fazer?')
+  msg.push('1. *Comprar agora* — escolher fornecedor e gerar pedido')
+  msg.push('2. *Só estava consultando* — salvar sem comprar')
+  msg.push('3. *Decidir depois* — cotação fica salva por 7 dias')
+
+  return msg.join('\n')
+}
