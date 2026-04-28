@@ -109,8 +109,7 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
       '',
       'Envie sua lista para cotar produtos.',
       'Representante? Envie *CADASTRO*.',
-    ].join('
-'))
+    ].join('\n'))
     return { ok: true }
   }
 
@@ -154,8 +153,7 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
         '',
         'Quando quiser comprar, é só enviar *comprar* que retomo a cotação.',
         'Ou envie uma nova lista quando precisar cotar novamente.',
-      ].join('
-'))
+      ].join('\n'))
       return { ok: true }
     }
     if (cmd === '3' || cmd === 'decidir depois' || cmd === 'depois') {
@@ -163,8 +161,7 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
         'Ok! Sua cotação fica salva por 7 dias.',
         '',
         'Quando quiser retomar, envie *comprar* ou *minha cotação*.',
-      ].join('
-'))
+      ].join('\n'))
       return { ok: true }
     }
     // Número ou nome — é escolha de fornecedor
@@ -209,8 +206,7 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
       'O que deseja fazer?',
       '1. Ver cotação em aberto',
       '2. Iniciar nova cotação',
-    ].join('
-'))
+    ].join('\n'))
     // Salva intenção de nova cotação temporariamente
     await supabase.from('comerciantes').update({ 
       nome: comerciante.nome // trigger para salvar pending_message
