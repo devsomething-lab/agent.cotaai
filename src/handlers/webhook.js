@@ -23,6 +23,18 @@ export async function handleWebhook(payload) {
   const { phone, message, type, mediaId, mimeType } = normalized
   if (!phone || (!message && !mediaId)) return { ok: true, skipped: true }
 
+  // Deduplicação por ID de mensagem
+  if (normalized.rawMsgId) {
+    const cacheKey = `msg_${normalized.rawMsgId}`
+    if (global._processedMsgs?.has(cacheKey)) {
+      console.log(`[webhook] msg ${normalized.rawMsgId} ja processada — ignorando`)
+      return { ok: true, skipped: true }
+    }
+    if (!global._processedMsgs) global._processedMsgs = new Set()
+    global._processedMsgs.add(cacheKey)
+    setTimeout(() => global._processedMsgs?.delete(cacheKey), 300000) // expira em 5min
+  }
+
   console.log(`[webhook] ${phone} | tipo: ${type} | "${(message ?? '').slice(0, 60)}"`)
 
   // 1. Verifica se está em processo de auto-cadastro
@@ -494,11 +506,22 @@ async function verificarEConsolidar(cotacaoId) {
 }
 
 export async function consolidarEEnviar(cotacaoId) {
+  // Proteção contra execução dupla — só consolida se ainda está aguardando
+  const { data: check } = await supabase.from('cotacoes').select('status').eq('id', cotacaoId).single()
+  if (!check || !['aguardando_respostas', 'consolidando'].includes(check.status)) {
+    console.log(`[consolidar] cotacao ${cotacaoId} ja foi consolidada (status: ${check?.status}) — ignorando`)
+    return
+  }
+
+  // Marca como consolidando para evitar execução paralela
+  await supabase.from('cotacoes').update({ status: 'consolidando' }).eq('id', cotacaoId)
+
   const { cotacao, itens } = await getCotacaoComItens(cotacaoId)
   const propostas = await getPropostasDaCotacao(cotacaoId)
 
   if (!propostas.length) {
-    await sendText(cotacao.comerciantes.telefone, 'Nenhum fornecedor respondeu. Tente novamente mais tarde.')
+    await supabase.from('cotacoes').update({ status: 'cancelada' }).eq('id', cotacaoId)
+    await sendText(cotacao.comerciantes.telefone, 'Nenhum fornecedor respondeu.')
     return
   }
 
