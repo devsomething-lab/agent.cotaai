@@ -5,19 +5,34 @@ import { supabase } from './client.js'
 
 export async function buscarCatalogoPorProduto(representanteId, nomeProduto) {
   /**
-   * Busca fuzzy pelo nome do produto no catálogo do representante.
-   * Retorna o item com melhor match (pg_trgm similarity).
+   * Busca pelo nome do produto OU marca no catálogo do representante.
+   * Retorna os melhores candidatos para o algoritmo de matching decidir.
    */
+  const nome = normalizarNome(nomeProduto)
+
+  // Extrai palavras com mais de 2 chars para busca ampla
+  const palavras = nome.split(' ').filter(p => p.length > 2)
+
+  // Busca ampla — retorna tudo do representante para o algoritmo filtrar
   const { data, error } = await supabase
     .from('vw_catalogo_preco_efetivo')
     .select('*')
     .eq('representante_id', representanteId)
-    .ilike('produto', `%${normalizarNome(nomeProduto)}%`)
     .order('preco_efetivo', { ascending: true })
-    .limit(3)
 
   if (error) throw error
-  return data ?? []
+  if (!data?.length) return []
+
+  // Filtra localmente os que têm alguma palavra em comum ou marca bate
+  return data.filter(item => {
+    const prodCat = normalizarNome(item.produto)
+    const marcaCat = normalizarNome(item.marca ?? '')
+
+    // Checa se alguma palavra do pedido aparece no produto ou marca do catálogo
+    return palavras.some(p =>
+      prodCat.includes(p) || marcaCat.includes(p) || p.includes(marcaCat)
+    ) || prodCat.includes(nome) || nome.includes(prodCat)
+  })
 }
 
 export async function buscarCatalogoCompleto(representanteId) {
