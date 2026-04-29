@@ -580,7 +580,23 @@ async function handleEscolhaFornecedor({ comerciante, cotacao, resposta }) {
   await supabase.from('pedido_itens').insert(pedidoItens)
   await supabase.from('cotacoes').update({ status: 'pedido_gerado', fechado_em: new Date().toISOString() }).eq('id', cotacao.id)
 
-  await sendText(comerciante.telefone, templatePedidoConfirmado(pedido, pedidoItens, repEscolhido))
+  // Mensagem de confirmação final ao comerciante
+  const linhasPedido = pedidoItens.map(it => {
+    const marca = it.marca ? ` (${it.marca})` : ''
+    return `${it.produto}${marca}: R$ ${it.preco_unitario?.toFixed(2)} × ${it.quantidade ?? 1}`
+  }).join('\n')
+
+  await sendText(comerciante.telefone, [
+    `Pedido confirmado.`,
+    ``,
+    `${repEscolhido.nome} · ${repEscolhido.empresa ?? ''}`,
+    linhasPedido,
+    ``,
+    `Total: R$ ${pedido.valor_total?.toFixed(2)}`,
+    `Pagamento: ${pedido.prazo_pagamento_dias}d · Entrega: ${pedido.prazo_entrega_dias}d`,
+    ``,
+    `O representante foi notificado.`,
+  ].join('\n'))
 
   const resumo = pedidoItens.map(it => `• ${it.produto} ×${it.quantidade} — R$ ${it.preco_total?.toFixed(2)}`).join('\n')
   await sendText(repEscolhido.telefone, [
@@ -707,39 +723,50 @@ async function handleReenviarComparativo(comerciante, cotacao, phone) {
 
 // ── Template comparativo com pergunta de intenção ─────────────────────
 function templateComparativoComIntencao(consolidado, cotacaoId) {
-  const { itensMelhorPreco, melhorFornecedor, rankingFornecedores, propostas } = consolidado
-
-  let msg = [
-    `📊 *Comparativo — Cotação #${cotacaoId.slice(-6).toUpperCase()}*`, '',
-    `*Melhor fornecedor geral:*`,
-    `   ${melhorFornecedor.nome} (${melhorFornecedor.empresa ?? ''}) — Score: ${(melhorFornecedor.score * 100).toFixed(0)}pts`,
-    '', `*Melhor preço por item:*`,
-  ]
-
-  for (const item of itensMelhorPreco) {
-    msg.push(`  • ${item.produto}: R$ ${item.preco_unitario?.toFixed(2)} — ${item.representante}`)
-  }
-
-  msg.push('', '—', '*Propostas recebidas:*')
+  const { propostas } = consolidado
 
   const reps = [...new Set(propostas.map(p => p.representantes?.nome))]
+  const msg = [`*Cotação #${cotacaoId.slice(-6).toUpperCase()}*`]
+
   for (const rep of reps) {
     const props = propostas.filter(p => p.representantes?.nome === rep)
-    const total = props.reduce((s, p) => s + (p.preco_total ?? 0), 0)
+    const empresa = props[0]?.representantes?.empresa ?? ''
     const pg = props[0]?.prazo_pagamento_dias
     const en = props[0]?.prazo_entrega_dias
-    msg.push(`\n*${rep}*`)
-    msg.push(`   Total: R$ ${total.toFixed(2)} | Pgto: ${pg ?? '?'}d | Entrega: ${en ?? '?'}d`)
-    for (const p of props) {
-      msg.push(`   - ${p.produto}: R$ ${p.preco_unitario?.toFixed(2)}`)
+    const origem = props[0]?.origem // catalogo | manual | promocao
+    const criadoEm = props[0]?.criado_em
+      ? new Date(props[0].criado_em).toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' })
+      : null
+
+    msg.push('')
+    msg.push(`*${rep}* · ${empresa}`)
+
+    // Informa origem da resposta
+    if (origem === 'catalogo' || origem === 'promocao') {
+      msg.push(`Catálogo · atualizado em ${criadoEm ?? '—'}`)
+    } else {
+      msg.push(`Resposta manual · ${criadoEm ?? '—'}`)
     }
+
+    msg.push('')
+    msg.push('Preço por item:')
+    for (const p of props) {
+      const marca = p.marca ? ` (${p.marca})` : ''
+      msg.push(`${p.produto}${marca}: R$ ${p.preco_unitario?.toFixed(2)}`)
+    }
+
+    msg.push('')
+    msg.push('Condições:')
+    msg.push(`Prazo de Pagamento: ${pg ?? '?'}d`)
+    msg.push(`Prazo de Entrega: ${en ?? '?'}d`)
   }
 
-  msg.push('', '—')
+  msg.push('')
+  msg.push('—')
   msg.push('O que deseja fazer?')
-  msg.push('1. *Comprar agora* — escolher fornecedor e gerar pedido')
-  msg.push('2. *Só estava consultando* — salvar sem comprar')
-  msg.push('3. *Decidir depois* — cotação fica salva por 7 dias')
+  msg.push('1. Comprar agora — escolher fornecedor e gerar pedido')
+  msg.push('2. Só estava consultando — salvar sem comprar')
+  msg.push('3. Decidir depois — cotação fica salva por 24 horas')
 
   return msg.join('\n')
 }
