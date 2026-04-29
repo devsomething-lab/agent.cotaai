@@ -3,7 +3,7 @@ import { supabase, findOrCreateComercianteByTelefone, findRepresentanteByTelefon
          getAllRepresentantesAtivos } from '../db/client.js'
 import { extrairListaProdutos, estruturarRespostaRep, transcreverAudio } from '../agents/extractor.js'
 import { extrairCatalogo, classificarMensagemRep } from '../agents/catalogo_agent.js'
-import { consolidarPropostas } from '../agents/consolidator.js'
+import { consolidarPropostas, gerarResumoNegociacao } from '../agents/consolidator.js'
 import { resolverCotacaoAutomatica, salvarPropostasAutomaticas } from '../agents/auto_quote.js'
 import { upsertCatalogoEmLote, salvarPromocao } from '../db/catalogo.js'
 import { sendText, sendTextOrTemplate, downloadMedia, normalizeMetaPayload,
@@ -255,10 +255,10 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
     if (fallback) { await sendText(phone, mensagem); return { ok: true } }
   }
 
-  // Extrai lista com IA
+  // Extrai lista com IA — Feature 5: passa comercianteId para sugestão de quantidades
   let extraido
   try {
-    extraido = await extrairListaProdutos(mensagemParaIA)
+    extraido = await extrairListaProdutos(mensagemParaIA, { comercianteId: comerciante.id })
   } catch (err) {
     await sendText(phone, 'Não consegui interpretar sua lista. Tente em texto: "2 cx Coca-Cola 2L, 1 fardo Leite Ninho"')
     return { ok: false }
@@ -296,10 +296,17 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
   const resumo = extraido.itens.map((it, i) => {
     const marca = it.marca ? ` (${it.marca})` : ''
     const un = it.unidade ? ` – ${it.unidade}` : ''
-    return `${i + 1}. ${it.produto}${marca}${un} × ${it.quantidade ?? 1}`
+    const sufixo = it.obs?.includes('histórico') ? ' _(sugestão)_' : ''
+    return `${i + 1}. ${it.produto}${marca}${un} × ${it.quantidade ?? 1}${sufixo}`
   }).join('\n')
 
-  await sendText(phone, [`*Entendi sua lista:*`, '', resumo, '', 'Verificando catálogos dos representantes...'].join('\n'))
+  // Feature 5: avisa se usou histórico para sugerir quantidades
+  const temSugestoes = extraido.itens.some(it => it.obs?.includes('histórico'))
+  const rodapeHistorico = temSugestoes
+    ? '\n\n_Quantidades marcadas com (sugestão) são baseadas no seu histórico de compras. Pode me enviar a lista com as quantidades corretas se quiser ajustar._'
+    : ''
+
+  await sendText(phone, [`*Entendi sua lista:*`, '', resumo, rodapeHistorico, '', 'Verificando catálogos dos representantes...'].join('\n'))
 
   // ── Tenta cotação automática ──────────────────────────────────────
   const { repsAutomaticos, repsManuais, itensSemCobertura, modo } =
@@ -406,15 +413,89 @@ async function handleAtualizacaoCatalogo({ rep, message, type, mediaId, mimeType
       msgs.push(`${resultado.erros.length} item(ns) com erro — não foram salvos`)
     }
 
+    // Feature 4: inclui aviso de variações significativas na confirmação para o rep
+    if (resultado.alertas?.length) {
+      msgs.push(``)
+      msgs.push(`*Variações de preço detectadas (≥10%):*`)
+      for (const al of resultado.alertas) {
+        const seta = al.subiu ? '📈' : '📉'
+        const sinal = al.subiu ? '+' : ''
+        msgs.push(`${seta} ${al.produto}: R$ ${al.preco_anterior?.toFixed(2)} → R$ ${al.preco_novo?.toFixed(2)} (${sinal}${al.variacao_pct}%)`)
+      }
+    }
+
     msgs.push(``, `Seus preços serão usados automaticamente nas próximas cotações. 🚀`)
 
     await sendText(rep.telefone, msgs.join('\n'))
+
+    // Feature 4: notifica comerciantes com cotações ativas que têm esses produtos
+    if (resultado.alertas?.length) {
+      await notificarComerciantesComVariacao(resultado.alertas, rep)
+    }
+
     return { ok: true, inseridos: resultado.inseridos, atualizados: resultado.atualizados }
 
   } catch (err) {
     console.error('[catalogo] erro:', err.message)
     await sendText(rep.telefone, 'Erro ao processar sua tabela. Tente enviar um arquivo Excel (.xlsx) ou liste os produtos em texto.')
     return { ok: false }
+  }
+}
+
+// Feature 4: busca comerciantes com cotações ativas e notifica sobre variação de preço
+async function notificarComerciantesComVariacao(alertas, rep) {
+  try {
+    const produtosAfetados = alertas.map(a => a.produto)
+
+    // Busca cotacao_itens com esses produtos em cotações aguardando respostas ou escolha
+    const { data: itensAtivos } = await supabase
+      .from('cotacao_itens')
+      .select(`
+        produto,
+        cotacoes!inner(
+          id, status,
+          comerciantes!inner(id, telefone, nome)
+        )
+      `)
+      .in('produto', produtosAfetados)
+      .in('cotacoes.status', ['aguardando_respostas', 'aguardando_escolha'])
+
+    if (!itensAtivos?.length) return
+
+    // Deduplicar por telefone de comerciante
+    const notificados = new Set()
+    for (const item of itensAtivos) {
+      const comerciante = item.cotacoes?.comerciantes
+      if (!comerciante?.telefone || notificados.has(comerciante.telefone)) continue
+      notificados.add(comerciante.telefone)
+
+      // Filtra só os alertas relevantes para este comerciante
+      const alertasDoItem = alertas.filter(al =>
+        al.produto.toLowerCase().includes(item.produto?.toLowerCase()) ||
+        item.produto?.toLowerCase().includes(al.produto?.toLowerCase())
+      )
+      if (!alertasDoItem.length) continue
+
+      const linhasAlerta = alertasDoItem.map(al => {
+        const seta = al.subiu ? '📈' : '📉'
+        const sinal = al.subiu ? '+' : ''
+        return `${seta} ${al.produto}: ${sinal}${al.variacao_pct}% (R$ ${al.preco_anterior?.toFixed(2)} → R$ ${al.preco_novo?.toFixed(2)})`
+      }).join('\n')
+
+      await sendText(comerciante.telefone, [
+        `*Alerta de preço — ${rep.nome} (${rep.empresa ?? ''})* atualizo sua tabela.`,
+        ``,
+        `Produtos com variação ≥ 10% em sua cotação em aberto:`,
+        linhasAlerta,
+        ``,
+        `Envie *minha cotação* para ver o comparativo atualizado.`,
+      ].join('\n'))
+
+      console.log(`[variacao] notificado: ${comerciante.nome} (${comerciante.telefone}) sobre ${alertasDoItem.length} produto(s)`)
+    }
+  } catch (err) {
+    // Não deixa falha na notificação derrubar o fluxo principal
+    console.error('[notificarComerciantesComVariacao] erro:', err.message)
   }
 }
 
@@ -548,7 +629,11 @@ export async function consolidarEEnviar(cotacaoId) {
   }
 
   await supabase.from('cotacoes').update({ status: 'aguardando_escolha' }).eq('id', cotacaoId)
-  const msgComparativo = templateComparativoComIntencao(consolidado, cotacaoId)
+
+  // Feature 3: gera resumo em linguagem natural com trade-offs
+  const resumo = await gerarResumoNegociacao(consolidado)
+
+  const msgComparativo = templateComparativoComIntencao(consolidado, cotacaoId, resumo)
   await sendText(cotacao.comerciantes.telefone, msgComparativo)
 }
 
@@ -760,7 +845,7 @@ async function handleReenviarComparativo(comerciante, cotacao, phone) {
 }
 
 // ── Template comparativo com pergunta de intenção ─────────────────────
-function templateComparativoComIntencao(consolidado, cotacaoId) {
+function templateComparativoComIntencao(consolidado, cotacaoId, resumo = null) {
   const { propostas } = consolidado
 
   const reps = [...new Set(propostas.map(p => p.representantes?.nome))]
@@ -801,6 +886,11 @@ function templateComparativoComIntencao(consolidado, cotacaoId) {
 
   msg.push('')
   msg.push('—')
+  // Feature 3: resumo em linguagem natural com trade-offs (quando disponível)
+  if (resumo) {
+    msg.push(resumo)
+    msg.push('')
+  }
   msg.push('O que deseja fazer?')
   msg.push('1. Comprar agora — escolher fornecedor e gerar pedido')
   msg.push('2. Só estava consultando — salvar sem comprar')

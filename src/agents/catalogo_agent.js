@@ -5,37 +5,24 @@ import 'dotenv/config'
 
 const client = new Anthropic()
 
-// ── Extrai catálogo de preços de qualquer formato ─────────────────────
+// ── Prompts por tipo de documento ─────────────────────────────────────
+// Feature 2: prompts especializados por mídia para maximizar recall
 
-export async function extrairCatalogo(mensagem) {
-  /**
-   * mensagem = { tipo: 'texto'|'foto'|'pdf'|'planilha', texto?, mediaId?, mimeType? }
-   * Retorna: { itens: [{produto, marca, unidade, preco_unitario,
-   *                     prazo_pagamento_dias, prazo_entrega_dias, valido_ate, sku}],
-   *            tipo_documento, confianca }
-   */
-
-  // Planilha: parse local com xlsx antes de mandar para IA
-  if (mensagem.tipo === 'planilha' && mensagem.mediaId) {
-    return extrairCatalogoDeExcel(mensagem.mediaId)
-  }
-
-  const system = `Você é um especialista em extrair tabelas de preços de representantes comerciais brasileiros.
+const SYSTEM_BASE = `Você é um especialista em extrair tabelas de preços de representantes comerciais brasileiros.
 
 Sua tarefa: identificar TODOS os produtos com preços e condições comerciais.
 
 Regras de extração:
-- Produto: normalize o nome (ex: "coca 2l" → "Coca-Cola 2L")
-- Unidade: identifique embalagem (caixa, fardo, pacote, kg, unidade, lata, garrafa)
-- Preço: extraia apenas o valor numérico (sem R$)
-- Prazo pagamento: converta para dias (ex: "30 dias", "30/60" → 30, "à vista" → 0)
-- Prazo entrega: converta para dias (ex: "2 dias úteis" → 2)
-- SKU: código do produto se mencionado, senão null
-- valido_ate: se mencionar validade (ex: "preços válidos até 31/03"), use formato YYYY-MM-DD, senão null
+- Produto: normalize o nome (ex: "coca 2l" → "Coca-Cola 2L", "det ypê" → "Detergente Ypê")
+- Unidade: identifique embalagem (caixa, fardo, pacote, kg, unidade, lata, garrafa, galão)
+- Preço: extraia apenas o valor numérico (sem R$). Vírgula = decimal (ex: "12,50" → 12.5)
+- Prazo pagamento: converta para dias ("30 dias" → 30, "30/60" → 30, "à vista" → 0, "30dd" → 30)
+- Prazo entrega: converta para dias ("2 dias úteis" → 2, "imediato" → 0)
+- SKU: código alfanumérico se mencionado, senão null
+- valido_ate: se mencionar validade ("válido até 31/03", "até 30/04/2025"), formato YYYY-MM-DD; senão null
+- Se houver condições gerais ("todos 30 dias pgto"), aplique a todos os itens sem prazo específico
 
-Se o representante mencionar condições gerais (ex: "todos os produtos: pagamento em 30 dias"), aplique a todos os itens.
-
-RETORNE APENAS JSON, sem texto adicional:
+RETORNE APENAS JSON válido, sem texto, markdown ou explicações:
 {
   "itens": [
     {
@@ -56,6 +43,52 @@ RETORNE APENAS JSON, sem texto adicional:
   "validade_geral": "YYYY-MM-DD ou null"
 }`
 
+// Feature 2: prompt adicional para FOTOS (manuscritas ou impressas com baixa qualidade)
+const INSTRUCOES_FOTO = `
+INSTRUÇÕES ESPECÍFICAS PARA IMAGEM:
+- A imagem pode ser foto de papel manuscrito, caderno, bloco de notas ou planilha impressa
+- Leia com atenção escritas cursivas ou em letra de forma, mesmo que imperfeitas
+- Preços podem estar escritos como "12,50", "R$12.50", "12/50", "$12" — trate todos como preço
+- Colunas podem estar desalinhadas; use contexto da linha para associar produto ao preço correto
+- Se a imagem estiver cortada, inclinada ou com sombra, faça o melhor possível com o visível
+- Produtos riscados, sublinhados ou com asterisco provavelmente têm destaque especial (promoção)
+- Se um preço parecer impossível (ex: R$ 0,10 para leite) desconfie e marque confiança como "baixa"
+- NÃO invente produtos ou preços que não estejam legíveis — omita itens ilegíveis
+- Para cada item duvidoso, inclua a leitura mais provável e marque confianca: "baixa"`
+
+// Feature 2: prompt adicional para PDFs (especialmente tabelões mal formatados)
+const INSTRUCOES_PDF = `
+INSTRUÇÕES ESPECÍFICAS PARA PDF:
+- O PDF pode ser uma tabela de preços gerada em sistema legado, exportação de ERP ou PDF escaneado
+- Ignore cabeçalhos repetidos, rodapés, numeração de página e marcas d'água
+- Preços podem estar em colunas separadas (preço unitário, preço caixa, preço atacado) — use o menor ou o unitário
+- Linhas de subtotal, total ou CNPJ/endereço devem ser ignoradas
+- Códigos de produto (SKU) geralmente são sequências numéricas ou alfanuméricas antes do nome do produto
+- Se o PDF tiver múltiplas seções/categorias, processe todas — não pare na primeira
+- Tabelas com colunas "qtd mínima" indicam venda por caixa/fardo; inclua na unidade
+- Descontos por volume: use o preço base (sem desconto) como preco_unitario`
+
+// ── Extrai catálogo de preços de qualquer formato ─────────────────────
+
+export async function extrairCatalogo(mensagem) {
+  /**
+   * mensagem = { tipo: 'texto'|'foto'|'pdf'|'planilha', texto?, mediaId?, mimeType? }
+   * Retorna: { itens: [{produto, marca, unidade, preco_unitario,
+   *                     prazo_pagamento_dias, prazo_entrega_dias, valido_ate, sku}],
+   *            tipo_documento, confianca }
+   */
+
+  // Planilha: parse local com xlsx antes de mandar para IA
+  if (mensagem.tipo === 'planilha' && mensagem.mediaId) {
+    return extrairCatalogoDeExcel(mensagem.mediaId)
+  }
+
+  // Feature 2: monta system prompt especializado por tipo de mídia
+  const systemExtra = mensagem.tipo === 'foto' ? INSTRUCOES_FOTO
+                    : mensagem.tipo === 'pdf'  ? INSTRUCOES_PDF
+                    : ''
+  const system = SYSTEM_BASE + systemExtra
+
   const content = []
 
   if (mensagem.texto) {
@@ -69,9 +102,17 @@ RETORNE APENAS JSON, sem texto adicional:
         type: 'image',
         source: { type: 'base64', media_type: mimeType || 'image/jpeg', data: buffer.toString('base64') },
       })
-      content.push({ type: 'text', text: 'Extraia todos os produtos com preços visíveis nesta imagem.' })
+      // Feature 2: instrução de tarefa mais explícita para fotos
+      content.push({
+        type: 'text',
+        text: [
+          'Extraia TODOS os produtos com preços visíveis nesta imagem.',
+          'Se for manuscrito, leia com atenção cada linha.',
+          'Não pule itens — mesmo parcialmente legíveis devem ser incluídos com confiança "baixa".',
+        ].join(' '),
+      })
     } catch (err) {
-      console.error('[extrairCatalogo] erro mídia:', err.message)
+      console.error('[extrairCatalogo] erro mídia foto:', err.message)
     }
   }
 
@@ -82,7 +123,16 @@ RETORNE APENAS JSON, sem texto adicional:
         type: 'document',
         source: { type: 'base64', media_type: 'application/pdf', data: buffer.toString('base64') },
       })
-      content.push({ type: 'text', text: 'Extraia todos os produtos com preços deste documento.' })
+      // Feature 2: instrução mais completa para PDFs
+      content.push({
+        type: 'text',
+        text: [
+          'Extraia TODOS os produtos com preços deste documento.',
+          'Processe todas as páginas e seções.',
+          'Ignore cabeçalhos, rodapés e totais.',
+          'Identifique e mapeie todas as colunas da tabela.',
+        ].join(' '),
+      })
     } catch (err) {
       console.error('[extrairCatalogo] erro pdf:', err.message)
     }
@@ -90,9 +140,12 @@ RETORNE APENAS JSON, sem texto adicional:
 
   if (!content.length) throw new Error('Nenhum conteúdo para processar')
 
+  // Feature 2: para fotos/PDFs usa max_tokens maior para não truncar tabelas longas
+  const maxTokens = ['foto', 'pdf'].includes(mensagem.tipo) ? 8192 : 4096
+
   const response = await client.messages.create({
     model: 'claude-sonnet-4-5',
-    max_tokens: 4096,
+    max_tokens: maxTokens,
     system,
     messages: [{ role: 'user', content }],
   })
@@ -110,6 +163,16 @@ RETORNE APENAS JSON, sem texto adicional:
         valido_ate:           it.valido_ate            ?? parsed.validade_geral,
       }))
     }
+
+    // Feature 2: para fotos com confiança baixa, filtra itens sem preço
+    if (mensagem.tipo === 'foto' && parsed.confianca === 'baixa') {
+      const antes = parsed.itens.length
+      parsed.itens = parsed.itens.filter(it => it.preco_unitario != null)
+      if (antes !== parsed.itens.length) {
+        console.log(`[extrairCatalogo] foto baixa confiança: ${antes - parsed.itens.length} item(s) sem preço removidos`)
+      }
+    }
+
     return parsed
   } catch {
     throw new Error(`IA retornou JSON inválido: ${raw.slice(0, 200)}`)
@@ -126,7 +189,6 @@ async function extrairCatalogoDeExcel(mediaId) {
 
   if (!linhas.length) throw new Error('Planilha vazia ou formato não reconhecido')
 
-  // Tenta mapear colunas automaticamente com IA
   const amostra = linhas.slice(0, 5)
   const colunas = Object.keys(linhas[0] ?? {})
 
@@ -153,7 +215,7 @@ RETORNE APENAS JSON:
 }`
 
   const resp = await client.messages.create({
-    model: 'claude-sonnet-4-5',
+    model: 'claude-haiku-4-5-20251001',
     max_tokens: 512,
     system,
     messages: [{ role: 'user', content: 'Mapeie as colunas desta planilha.' }],
@@ -161,7 +223,6 @@ RETORNE APENAS JSON:
 
   const mapa = JSON.parse(resp.content[0].text.replace(/```json|```/g, '').trim()).mapeamento
 
-  // Converte todas as linhas usando o mapeamento
   const itens = linhas
     .filter(l => l[mapa.produto] != null)
     .map(l => ({
@@ -182,13 +243,6 @@ RETORNE APENAS JSON:
 // ── Detecta se mensagem do rep é tabela de preços ou resposta de cotação
 
 export async function classificarMensagemRep(texto) {
-  /**
-   * Retorna: 'catalogo' | 'cotacao' | 'promocao' | 'outro'
-   * - catalogo:  rep está enviando/atualizando tabela de preços
-   * - cotacao:   rep está respondendo uma cotação específica
-   * - promocao:  rep está comunicando uma promoção temporária
-   * - outro:     mensagem genérica
-   */
   const system = `Classifique a mensagem de um representante comercial em uma categoria:
 
 - catalogo:  enviando tabela de preços geral, lista de produtos com valores, ou arquivo de preços
@@ -199,7 +253,7 @@ export async function classificarMensagemRep(texto) {
 RETORNE APENAS UMA PALAVRA: catalogo | cotacao | promocao | outro`
 
   const resp = await client.messages.create({
-    model: 'claude-sonnet-4-5',
+    model: 'claude-haiku-4-5-20251001',
     max_tokens: 10,
     system,
     messages: [{ role: 'user', content: texto }],
