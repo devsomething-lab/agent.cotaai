@@ -140,13 +140,28 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
     .single()
 
   if (cotacaoAguardandoEscolha && message) {
-    // Verifica se é resposta de intenção (1, 2, 3) ou escolha de fornecedor
+
+    // ── Passo 2: intenção já confirmada → usuário está escolhendo fornecedor ──
+    if (cotacaoAguardandoEscolha.obs_interna === 'confirmando:comprar') {
+      if (/^\d+$/.test(cmd) || cmd.length > 3) {
+        return handleEscolhaFornecedor({ comerciante, cotacao: cotacaoAguardandoEscolha, resposta: message })
+      }
+      // Resposta não reconhecida: repete a lista de fornecedores
+      return handlePedirEscolhaFornecedor(comerciante, cotacaoAguardandoEscolha, phone)
+    }
+
+    // ── Passo 1: resposta de intenção (1 / 2 / 3) ────────────────────────────
     if (cmd === '1' || cmd === 'comprar' || cmd === 'comprar agora') {
-      // Reenvia o comparativo para o comerciante escolher o fornecedor
-      return handleReenviarComparativo(comerciante, cotacaoAguardandoEscolha, phone)
+      // Seta estado para aguardar escolha de fornecedor
+      await supabase.from('cotacoes')
+        .update({ obs_interna: 'confirmando:comprar' })
+        .eq('id', cotacaoAguardandoEscolha.id)
+      return handlePedirEscolhaFornecedor(comerciante, cotacaoAguardandoEscolha, phone)
     }
     if (cmd === '2' || cmd === 'so consulta' || cmd === 'só consulta' || cmd === 'consultando') {
-      await supabase.from('cotacoes').update({ status: 'consulta' }).eq('id', cotacaoAguardandoEscolha.id)
+      await supabase.from('cotacoes')
+        .update({ status: 'consulta', obs_interna: null })
+        .eq('id', cotacaoAguardandoEscolha.id)
       await sendText(phone, [
         'Entendido! Seus preços foram salvos para consulta.',
         '',
@@ -163,7 +178,7 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
       ].join('\n'))
       return { ok: true }
     }
-    // Número ou nome — é escolha de fornecedor
+    // Número ou nome direto sem ter respondido intenção — trata como escolha imediata
     if (/^\d+$/.test(cmd) || cmd.length > 3) {
       return handleEscolhaFornecedor({ comerciante, cotacao: cotacaoAguardandoEscolha, resposta: message })
     }
@@ -181,7 +196,9 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
       .single()
 
     if (cotacaoConsulta) {
-      await supabase.from('cotacoes').update({ status: 'aguardando_escolha' }).eq('id', cotacaoConsulta.id)
+      await supabase.from('cotacoes')
+        .update({ status: 'aguardando_escolha', obs_interna: null })
+        .eq('id', cotacaoConsulta.id)
       return handleReenviarComparativo(comerciante, cotacaoConsulta, phone)
     }
   }
@@ -702,6 +719,27 @@ async function handleHistorico(comerciante, phone) {
   ).join('\n')
 
   await sendText(phone, `*Suas últimas cotações:*\n\n${linhas}\n\nEnvie *minha cotação* para ver detalhes da cotação em aberto.`)
+  return { ok: true }
+}
+
+// ── Pedir escolha de fornecedor (pós-intenção de compra) ─────────────────
+async function handlePedirEscolhaFornecedor(comerciante, cotacao, phone) {
+  const { itens } = await getCotacaoComItens(cotacao.id)
+  const propostas = await getPropostasDaCotacao(cotacao.id)
+  const consolidado = consolidarPropostas(itens, propostas)
+  const reps = consolidado.rankingFornecedores
+
+  const opcoes = reps.map((r, i) =>
+    `${i + 1}. *${r.nome}* (${r.empresa ?? ''}) — R$ ${r.totalScore?.toFixed(2) ?? '?'}`
+  ).join('\n')
+
+  await sendText(phone, [
+    'Ótimo! Com qual fornecedor deseja fechar o pedido?',
+    '',
+    opcoes,
+    '',
+    'Responda com o *número* do fornecedor.',
+  ].join('\n'))
   return { ok: true }
 }
 
