@@ -46,29 +46,28 @@ export async function handleWebhook(payload) {
     return handleMensagemRepresentante({ rep, message, type, mediaId, mimeType })
   }
 
-  // 4. Verifica onboarding do comerciante
+  // 4. Verifica onboarding do comerciante em andamento
   const sessaoComerciantge = await getSessaoOnboardingComerciantge(phone)
   if (sessaoComerciantge) {
     return handleOnboardingComerciantge(phone, message)
   }
 
-  // 5. Comerciante existente ou novo
+  // 5. Comerciante existente com cadastro completo
   const { data: comercianteExistente } = await supabase
     .from('comerciantes')
     .select('id, nome, empresa')
     .eq('telefone', phone)
     .single()
 
-  if (!comercianteExistente || !comercianteExistente.empresa) {
-    // Novo comerciante ou sem cadastro completo — inicia onboarding
-    if (!comercianteExistente) {
-      // Cria o registro primeiro
-      await supabase.from('comerciantes').insert({ telefone: phone, nome: phone })
-    }
-    return handleOnboardingComerciantge(phone, message)
+  if (comercianteExistente?.empresa) {
+    return handleMensagemComerciantge({ phone, message, type, mediaId, mimeType })
   }
 
-  return handleMensagemComerciantge({ phone, message, type, mediaId, mimeType })
+  // 6. Número desconhecido — inicia seleção de perfil
+  if (!comercianteExistente) {
+    await supabase.from('comerciantes').insert({ telefone: phone, nome: phone })
+  }
+  return handleAutocadastro(phone, message)
 }
 
 // ── Mensagem de boas-vindas para números desconhecidos ────────────────
