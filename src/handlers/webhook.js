@@ -14,14 +14,38 @@ import 'dotenv/config'
 
 const TIMEOUT_HORAS = parseInt(process.env.COTACAO_TIMEOUT_HORAS ?? '24')
 
+// ── Deduplicação de webhooks ──────────────────────────────────────────
+// Meta Cloud API pode entregar o mesmo webhook 2x em rápida sucessão.
+// Guarda messageIds processados por 60s para descartar duplicatas.
+
+const _mensagensProcessadas = new Map() // messageId → timestamp
+
+function jaProcessada(messageId) {
+  if (!messageId) return false
+  const agora = Date.now()
+  // Limpa entradas com mais de 60s
+  for (const [id, ts] of _mensagensProcessadas) {
+    if (agora - ts > 60_000) _mensagensProcessadas.delete(id)
+  }
+  if (_mensagensProcessadas.has(messageId)) return true
+  _mensagensProcessadas.set(messageId, agora)
+  return false
+}
+
 // ── Entry point ───────────────────────────────────────────────────────
 
 export async function handleWebhook(payload) {
   const normalized = normalizeMetaPayload(payload)
   if (!normalized) return { ok: true, skipped: true }
 
-  const { phone, message, type, mediaId, mimeType } = normalized
+  const { phone, message, type, mediaId, mimeType, messageId } = normalized
   if (!phone || (!message && !mediaId)) return { ok: true, skipped: true }
+
+  // Descarta webhook duplicado (Meta às vezes entrega 2x o mesmo messageId)
+  if (jaProcessada(messageId)) {
+    console.log(`[webhook] duplicata ignorada: ${messageId}`)
+    return { ok: true, skipped: true, reason: 'duplicate' }
+  }
 
   console.log(`[webhook] ${phone} | tipo: ${type} | "${(message ?? '').slice(0, 60)}"`)
 
@@ -125,6 +149,24 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
     return handleCancelarCotacao(comerciante, phone)
   }
 
+  if (cmd === 'nova cotacao' || cmd === 'nova cotação' || cmd === 'descartar') {
+    // Cancela qualquer cotação em aberto e orienta a enviar nova lista
+    const { data: cotacaoAberta } = await supabase
+      .from('cotacoes')
+      .select('*')
+      .eq('comerciante_id', comerciante.id)
+      .in('status', ['aguardando_respostas', 'aguardando_escolha', 'consulta'])
+      .order('criado_em', { ascending: false })
+      .limit(1)
+      .single()
+
+    if (cotacaoAberta) {
+      return handleCancelarParaNovaCotacao(comerciante, cotacaoAberta, phone)
+    }
+    await sendText(phone, 'Você não tem nenhuma cotação em aberto. Pode enviar sua lista de produtos!')
+    return { ok: true }
+  }
+
   if (cmd === 'historico' || cmd === 'histórico') {
     return handleHistorico(comerciante, phone)
   }
@@ -143,6 +185,17 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
 
     // ── Passo 2: intenção já confirmada → usuário está escolhendo fornecedor ──
     if (cotacaoAguardandoEscolha.obs_interna === 'confirmando:comprar') {
+      // "0" ou "voltar" → limpa estado e reenvia o comparativo
+      if (cmd === '0' || cmd === 'voltar' || cmd === 'voltar ao comparativo') {
+        await supabase.from('cotacoes')
+          .update({ obs_interna: null })
+          .eq('id', cotacaoAguardandoEscolha.id)
+        return handleReenviarComparativo(comerciante, cotacaoAguardandoEscolha, phone)
+      }
+      // "nova cotação" ou "descartar" → cancela e libera para nova lista
+      if (cmd === 'nova cotacao' || cmd === 'nova cotação' || cmd === 'descartar' || cmd === 'cancelar') {
+        return handleCancelarParaNovaCotacao(comerciante, cotacaoAguardandoEscolha, phone)
+      }
       if (/^\d+$/.test(cmd) || cmd.length > 3) {
         return handleEscolhaFornecedor({ comerciante, cotacao: cotacaoAguardandoEscolha, resposta: message })
       }
@@ -177,6 +230,9 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
         'Quando quiser retomar, envie *comprar* ou *minha cotação*.',
       ].join('\n'))
       return { ok: true }
+    }
+    if (cmd === '4' || cmd === 'nova cotacao' || cmd === 'nova cotação' || cmd === 'descartar') {
+      return handleCancelarParaNovaCotacao(comerciante, cotacaoAguardandoEscolha, phone)
     }
     // Número ou nome direto sem ter respondido intenção — trata como escolha imediata
     if (/^\d+$/.test(cmd) || cmd.length > 3) {
@@ -815,15 +871,31 @@ async function handlePedirEscolhaFornecedor(comerciante, cotacao, phone) {
   const reps = consolidado.rankingFornecedores
 
   const opcoes = reps.map((r, i) =>
-    `${i + 1}. *${r.nome}* (${r.empresa ?? ''}) — R$ ${r.totalScore?.toFixed(2) ?? '?'}`
+    `${i + 1}. *${r.nome}* (${r.empresa ?? ''}) — R$ ${r.valor_total?.toFixed(2) ?? '?'}`
   ).join('\n')
 
   await sendText(phone, [
-    'Ótimo! Com qual fornecedor deseja fechar o pedido?',
+    'Com qual fornecedor deseja fechar o pedido?',
     '',
     opcoes,
     '',
     'Responda com o *número* do fornecedor.',
+    'Envie *0* para voltar ao comparativo.',
+    'Envie *descartar* para cancelar e fazer uma nova cotação.',
+  ].join('\n'))
+  return { ok: true }
+}
+
+// ── Cancelar cotação atual e liberar para nova ────────────────────────
+async function handleCancelarParaNovaCotacao(comerciante, cotacao, phone) {
+  await supabase.from('cotacoes')
+    .update({ status: 'cancelada', obs_interna: null, fechado_em: new Date().toISOString() })
+    .eq('id', cotacao.id)
+
+  await sendText(phone, [
+    `Cotação *#${cotacao.id.slice(-6).toUpperCase()}* descartada.`,
+    '',
+    'Pode enviar sua nova lista de produtos quando quiser!',
   ].join('\n'))
   return { ok: true }
 }
@@ -894,7 +966,8 @@ function templateComparativoComIntencao(consolidado, cotacaoId, resumo = null) {
   msg.push('O que deseja fazer?')
   msg.push('1. Comprar agora — escolher fornecedor e gerar pedido')
   msg.push('2. Só estava consultando — salvar sem comprar')
-  msg.push('3. Decidir depois — cotação fica salva por 24 horas')
+  msg.push('3. Decidir depois — cotação fica salva por 7 dias')
+  msg.push('4. Descartar e fazer nova cotação')
 
   return msg.join('\n')
 }
