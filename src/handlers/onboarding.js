@@ -63,7 +63,7 @@ async function iniciarSeleçãoPerfil(telefone) {
   await sendText(telefone, [
     '👋 Olá! Bem-vindo ao *Kota*.',
     '',
-    'Aqui você cota produtos com seus fornecedores direto pelo WhatsApp — rápido, sem planilha e sem ligação.',
+    'Conectamos comerciantes e representantes para agilizar cotações direto pelo WhatsApp — sem planilha, sem ligação.',
     '',
     'Você é:',
     '1. Comerciante — quero cotar produtos',
