@@ -429,6 +429,29 @@ async function handleMensagemRepresentante({ rep, message, type, mediaId, mimeTy
     classificacao = await classificarMensagemRep(message)
   } else if (['planilha', 'pdf', 'foto'].includes(type)) {
     classificacao = 'catalogo'
+  } else if (type === 'documento') {
+    // Documento de formato não mapeado (ex: .numbers, .pages, .ods, .csv sem extensão)
+    // Verifica se o mimeType é suportado antes de tentar processar
+    const mimeSuportado = mimeType && (
+      mimeType.includes('sheet') ||
+      mimeType.includes('excel') ||
+      mimeType.includes('pdf') ||
+      mimeType.includes('csv')
+    )
+    if (mimeSuportado) {
+      classificacao = 'catalogo'
+    } else {
+      await sendText(rep.telefone, [
+        'Não consigo processar esse formato de arquivo.',
+        '',
+        'Para enviar seu catálogo, use:',
+        '• Planilha Excel (.xlsx) — recomendado',
+        '• PDF',
+        '• Foto da tabela impressa',
+        '• Lista em texto (ex: _Coca-Cola 2L · R$ 8,50 · pgto 30d_)',
+      ].join('\n'))
+      return { ok: true }
+    }
   }
 
   console.log(`[rep ${rep.nome}] classificacao: ${classificacao}`)
