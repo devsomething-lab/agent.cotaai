@@ -2,31 +2,68 @@ import axios from 'axios'
 import 'dotenv/config'
 
 // ── Meta Cloud API client ─────────────────────────────────────────────
-// Docs: https://developers.facebook.com/docs/whatsapp/cloud-api
 
-const META_VERSION = process.env.META_API_VERSION ?? 'v23.0'
+const META_VERSION    = process.env.META_API_VERSION   ?? 'v23.0'
 const PHONE_NUMBER_ID = process.env.META_PHONE_NUMBER_ID
-const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN
+const ACCESS_TOKEN    = process.env.META_ACCESS_TOKEN
 
 const meta = axios.create({
   baseURL: `https://graph.facebook.com/${META_VERSION}`,
   timeout: 15000,
   headers: {
-    Authorization: `Bearer ${ACCESS_TOKEN}`,
+    Authorization:  `Bearer ${ACCESS_TOKEN}`,
     'Content-Type': 'application/json',
   },
 })
 
+// ── SIM_MODE: captura mensagens em memória sem chamar a Meta API ──────
+// Ativado via SIM_MODE=true no .env ou na variável de ambiente.
+// O servidor expõe /sim/messages para o test runner ler as saídas.
+
+export const SIM_MODE = process.env.SIM_MODE === 'true'
+
+const _simCapture = []   // { to, text, sentAt }
+
+export function simGetMessages()  { return [..._simCapture] }
+export function simClearMessages() { _simCapture.length = 0 }
+
+// ── Envio de documento via URL pública ───────────────────────────────
+
+export async function sendDocument(telefone, url, filename, caption = null) {
+  if (SIM_MODE) {
+    const msg = `[DOCUMENTO: ${filename}] ${url}${caption ? ` | caption: ${caption}` : ''}`
+    _simCapture.push({ to: telefone, text: msg, sentAt: new Date().toISOString() })
+    console.log(`\n📎 [KOTA → ${telefone}] ${msg}\n`)
+    return { simulated: true }
+  }
+  const { data } = await meta.post(`/${PHONE_NUMBER_ID}/messages`, {
+    messaging_product: 'whatsapp',
+    recipient_type:    'individual',
+    to:                telefone,
+    type:              'document',
+    document: {
+      link:     url,
+      filename,
+      caption:  caption ?? undefined,
+    },
+  })
+  return data
+}
+
 // ── Envio de texto simples ────────────────────────────────────────────
 
 export async function sendText(telefone, texto) {
-  // telefone deve estar no formato internacional sem +: 5511999990001
+  if (SIM_MODE) {
+    _simCapture.push({ to: telefone, text: texto, sentAt: new Date().toISOString() })
+    console.log(`\n📤 [KOTA → ${telefone}]\n${texto}\n`)
+    return { simulated: true }
+  }
   const { data } = await meta.post(`/${PHONE_NUMBER_ID}/messages`, {
     messaging_product: 'whatsapp',
-    recipient_type: 'individual',
-    to: telefone,
-    type: 'text',
-    text: { body: texto, preview_url: false },
+    recipient_type:    'individual',
+    to:                telefone,
+    type:              'text',
+    text:              { body: texto, preview_url: false },
   })
   return data
 }
@@ -34,20 +71,25 @@ export async function sendText(telefone, texto) {
 // ── Envio com botões de resposta rápida (até 3 botões) ────────────────
 
 export async function sendButtons(telefone, texto, botoes) {
-  // botoes = [{ id: 'confirmar', label: 'Confirmar' }, ...]
-  // Meta suporta até 3 botões de resposta rápida
+  if (SIM_MODE) {
+    const label = botoes.map((b, i) => `[${i + 1}] ${b.label}`).join('  ')
+    const full  = `${texto}\n${label}`
+    _simCapture.push({ to: telefone, text: full, sentAt: new Date().toISOString() })
+    console.log(`\n📤 [KOTA → ${telefone}] (buttons)\n${full}\n`)
+    return { simulated: true }
+  }
   const { data } = await meta.post(`/${PHONE_NUMBER_ID}/messages`, {
     messaging_product: 'whatsapp',
-    recipient_type: 'individual',
-    to: telefone,
-    type: 'interactive',
+    recipient_type:    'individual',
+    to:                telefone,
+    type:              'interactive',
     interactive: {
       type: 'button',
       body: { text: texto },
       action: {
         buttons: botoes.slice(0, 3).map(b => ({
-          type: 'reply',
-          reply: { id: b.id, title: b.label.slice(0, 20) }, // title máximo 20 chars
+          type:  'reply',
+          reply: { id: b.id, title: b.label.slice(0, 20) },
         })),
       },
     },
@@ -56,28 +98,25 @@ export async function sendButtons(telefone, texto, botoes) {
 }
 
 // ── Download de mídia via Media ID da Meta ───────────────────────────
-// A Meta NÃO retorna URLs diretas no webhook — retorna um media_id.
-// É necessário primeiro buscar a URL e depois baixar com o token.
 
 export async function downloadMedia(mediaId) {
-  // 1. Busca a URL temporária do arquivo
+  if (SIM_MODE) {
+    // Retorna buffer vazio em modo simulação (mídia não é testada aqui)
+    return { buffer: Buffer.from(''), mimeType: 'image/jpeg' }
+  }
   const { data: mediaData } = await meta.get(`/${mediaId}`)
-  // 2. Baixa o arquivo usando o token de autenticação
   const resp = await axios.get(mediaData.url, {
     responseType: 'arraybuffer',
-    headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
+    headers:      { Authorization: `Bearer ${ACCESS_TOKEN}` },
   })
-  return {
-    buffer: Buffer.from(resp.data),
-    mimeType: mediaData.mime_type,
-  }
+  return { buffer: Buffer.from(resp.data), mimeType: mediaData.mime_type }
 }
 
 // ── Templates formatados ─────────────────────────────────────────────
 
 export function templateCotacaoParaRep(itens, cotacaoId) {
   const linhas = itens.map((it, i) => {
-    const marca = it.marca ? ` (${it.marca})` : ''
+    const marca   = it.marca   ? ` (${it.marca})`   : ''
     const unidade = it.unidade ? ` · ${it.unidade}` : ''
     return `${i + 1}. ${it.produto}${marca}${unidade} · ${it.quantidade ?? 1}un`
   }).join('\n')
@@ -94,27 +133,22 @@ export function templateCotacaoParaRep(itens, cotacaoId) {
 
 export function templateComparativo(consolidado, cotacaoId) {
   const { itensMelhorPreco, melhorFornecedor, rankingFornecedores, propostas } = consolidado
-
   const reps = [...new Set(propostas.map(p => p.representantes?.nome))]
 
-  let msg = [
+  const msg = [
     `*Kota · #${cotacaoId.slice(-6).toUpperCase()}*`,
     '',
   ]
 
-  // Bloco por fornecedor
   reps.forEach((rep, i) => {
-    const props = propostas.filter(p => p.representantes?.nome === rep)
-    const total = props.reduce((s, p) => s + (p.preco_total ?? 0), 0)
-    const pg = props[0]?.prazo_pagamento_dias
-    const en = props[0]?.prazo_entrega_dias
-    const score = rankingFornecedores?.find(r => r.nome === rep)?.score
+    const props    = propostas.filter(p => p.representantes?.nome === rep)
+    const total    = props.reduce((s, p) => s + (p.preco_total ?? 0), 0)
+    const pg       = props[0]?.prazo_pagamento_dias
+    const en       = props[0]?.prazo_entrega_dias
     const isMelhor = melhorFornecedor?.nome === rep
 
     msg.push(`${isMelhor ? '🏆' : ''} *${i + 1}. ${rep}*${isMelhor ? ' — melhor oferta' : ''}`)
-    props.forEach(p => {
-      msg.push(`  ${p.produto} · R$ ${p.preco_unitario?.toFixed(2)}`)
-    })
+    props.forEach(p => msg.push(`  ${p.produto} · R$ ${p.preco_unitario?.toFixed(2)}`))
     msg.push(`  Total R$ ${total.toFixed(2)} · pgto ${pg ?? '?'}d · entrega ${en ?? '?'}d`)
     msg.push('')
   })
@@ -142,21 +176,27 @@ export function templatePedidoConfirmado(pedido, itens, representante) {
 }
 
 // ── Envio de template aprovado pela Meta ─────────────────────────────
+
 export async function sendTemplate(telefone, templateName, params = []) {
+  if (SIM_MODE) {
+    const text = `[TEMPLATE: ${templateName}] params: ${JSON.stringify(params)}`
+    _simCapture.push({ to: telefone, text, sentAt: new Date().toISOString() })
+    return { ok: true, simulated: true }
+  }
   const components = params.length ? [{
-    type: 'body',
+    type:       'body',
     parameters: params.map(p => ({ type: 'text', text: String(p) })),
   }] : []
 
   try {
     const { data } = await meta.post(`/${PHONE_NUMBER_ID}/messages`, {
       messaging_product: 'whatsapp',
-      recipient_type: 'individual',
-      to: telefone,
-      type: 'template',
+      recipient_type:    'individual',
+      to:                telefone,
+      type:              'template',
       template: {
-        name: templateName,
-        language: { code: 'pt_BR' },
+        name:       templateName,
+        language:   { code: 'pt_BR' },
         components,
       },
     })
@@ -168,14 +208,13 @@ export async function sendTemplate(telefone, templateName, params = []) {
 }
 
 // ── Envio com fallback automático ─────────────────────────────────────
-// Tenta texto livre; se falhar por janela fechada, usa o template
+
 export async function sendTextOrTemplate(telefone, texto, nomeRep) {
   try {
     await sendText(telefone, texto)
     return { via: 'text' }
   } catch (err) {
     const code = err.response?.data?.error?.code
-    // 131047 = fora da janela 24h | 131026 = número não opt-in
     if (code === 131047 || code === 131026) {
       console.log(`[whatsapp] janela fechada para ${telefone} — usando template`)
       const result = await sendTemplate(telefone, 'cotacao_nova', [nomeRep])
@@ -185,27 +224,42 @@ export async function sendTextOrTemplate(telefone, texto, nomeRep) {
   }
 }
 
+// ── Normaliza payload da Meta ─────────────────────────────────────────
+
 export function normalizeMetaPayload(body) {
   try {
     const value = body?.entry?.[0]?.changes?.[0]?.value
     if (!value) return null
     const msg = value?.messages?.[0]
     if (!msg) return null
-    const phone = msg.from
+
+    const phone   = msg.from
     const msgType = msg.type
-    let type = 'texto', message = null, mediaId = null, mimeType = null
+    let type = 'texto', message = null, mediaId = null, mimeType = null, messageId = msg.id
+
     switch (msgType) {
-      case 'text': type='texto'; message=msg.text?.body ?? null; break
-      case 'image': type='foto'; mediaId=msg.image?.id; mimeType=msg.image?.mime_type ?? 'image/jpeg'; message=msg.image?.caption ?? null; break
-      case 'audio': case 'voice': type='audio'; mediaId=msg.audio?.id ?? msg.voice?.id; mimeType='audio/ogg'; break
+      case 'text':
+        type = 'texto'; message = msg.text?.body ?? null; break
+      case 'image':
+        type = 'foto'; mediaId = msg.image?.id; mimeType = msg.image?.mime_type ?? 'image/jpeg'
+        message = msg.image?.caption ?? null; break
+      case 'audio': case 'voice':
+        type = 'audio'; mediaId = msg.audio?.id ?? msg.voice?.id; mimeType = 'audio/ogg'; break
       case 'document': {
-        const mime=msg.document?.mime_type ?? ''
-        type=mime.includes('pdf')?'pdf':mime.includes('sheet')||mime.includes('excel')?'planilha':'documento'
-        mediaId=msg.document?.id; mimeType=mime; message=msg.document?.caption ?? null; break
+        const mime = msg.document?.mime_type ?? ''
+        type    = mime.includes('pdf') ? 'pdf' : mime.includes('sheet') || mime.includes('excel') ? 'planilha' : 'documento'
+        mediaId = msg.document?.id; mimeType = mime; message = msg.document?.caption ?? null; break
       }
-      case 'interactive': type='texto'; message=msg.interactive?.button_reply?.title ?? msg.interactive?.list_reply?.title ?? null; break
-      default: type='texto'; message=msg.text?.body ?? null
+      case 'interactive':
+        type = 'texto'
+        message = msg.interactive?.button_reply?.title ?? msg.interactive?.list_reply?.title ?? null; break
+      default:
+        type = 'texto'; message = msg.text?.body ?? null
     }
-    return { phone, message, type, mediaId, mimeType, rawMsgId: msg.id }
-  } catch(err) { console.error('[normalizeMetaPayload]', err.message); return null }
+
+    return { phone, message, type, mediaId, mimeType, messageId }
+  } catch (err) {
+    console.error('[normalizeMetaPayload]', err.message)
+    return null
+  }
 }

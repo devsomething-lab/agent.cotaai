@@ -1,5 +1,7 @@
 import { supabase } from '../db/client.js'
-import { sendText } from '../services/whatsapp.js'
+import { sendText, sendDocument } from '../services/whatsapp.js'
+
+const TEMPLATE_CATALOGO_URL = process.env.TEMPLATE_CATALOGO_URL ?? null
 
 // ── Verifica sessão ativa ─────────────────────────────────────────────
 
@@ -63,7 +65,7 @@ async function iniciarSeleçãoPerfil(telefone) {
   await sendText(telefone, [
     '👋 Olá! Bem-vindo ao *Kota*.',
     '',
-    'Conectamos comerciantes e representantes para agilizar cotações direto pelo WhatsApp — sem planilha, sem ligação.',
+    'Somos o primeiro agente de cotação com IA do Brasil — conectamos comerciantes e representantes para fechar negócios direto pelo WhatsApp, em minutos.',
     '',
     'Você é:',
     '1. Comerciante — quero cotar produtos',
@@ -165,19 +167,33 @@ async function processarEtapaRep(telefone, sessao, message) {
         .eq('telefone', telefone)
 
       await sendText(telefone, [
-        `✅ *Cadastro concluído! Bem-vindo ao Kota, ${s.nome}!*`,
+        `*Cadastro concluído! Bem-vindo ao Kota, ${s.nome}.*`,
         '',
         `*${s.empresa}*`,
         `Entrega: ${s.prazo_entrega_dias} dia(s) · Pagamento: ${diasPg === 0 ? 'à vista' : `${diasPg} dias`}`,
         '',
-        'A partir de agora você receberá pedidos de cotação aqui no WhatsApp. Quando um comerciante cotar um produto do seu catálogo, você é notificado automaticamente.',
+        'A partir de agora você receberá pedidos de cotação aqui no WhatsApp.',
         '',
-        '*Próximo passo:* envie sua tabela de preços para cadastrar no seu catálogo.',
+        '*Como funciona:*',
+        'Com catálogo cadastrado → as cotações recebidas são respondidas automaticamente e você é notificado',
+        'Sem catálogo → você recebe a cotação e responde manualmente por mensagem',
+        '',
+        '*Próximo passo:* envie seu catálogo para ativar as respostas automáticas.',
         'Pode enviar como:',
-        '• Planilha Excel (.xlsx)',
-        '• Lista em texto (ex: _Coca-Cola 2L · R$ 8,50 · pgto 30d_)',
-        '• Foto da tabela impressa',
+        '- Planilha Excel (.xlsx) — em anexo um template para preencher',
+        '- Lista em texto (ex: _Coca-Cola 2L · R$ 8,50 · pgto 30d_)',
+        '- Foto da tabela impressa',
       ].join('\n'))
+
+      // Envia template Excel se URL configurada
+      if (TEMPLATE_CATALOGO_URL) {
+        await sendDocument(
+          telefone,
+          TEMPLATE_CATALOGO_URL,
+          'catalogo_kota_template.xlsx',
+          'Preencha com seus produtos e preços e envie de volta para mim.'
+        )
+      }
       return { ok: true, repId: rep.id }
     }
     default: return null
@@ -227,20 +243,24 @@ async function processarEtapaComerciantge(telefone, sessao, message) {
         .eq('telefone', telefone)
 
       await sendText(telefone, [
-        `✅ *Tudo pronto! Bem-vindo ao Kota, ${s.nome}!*`,
+        `*Tudo pronto! Bem-vindo ao Kota, ${s.nome}.*`,
         '',
-        `*${texto}* está pronto para cotar. 🚀`,
+        `*${texto}* está pronto para cotar.`,
         '',
-        'É simples: me manda a lista de produtos que você precisa comprar e eu coto com todos os seus fornecedores automaticamente.',
+        'Me manda a lista de produtos que você precisa comprar e eu cuido do resto.',
+        '',
+        '*Como funciona:*',
+        'Com catálogo cadastrado → as cotações recebidas são respondidas automaticamente e você é notificado',
+        'Sem catálogo → você recebe a cotação e responde manualmente por mensagem',
+        '',
+        'Nos dois casos você recebe um comparativo com preços e condições para escolher o melhor fornecedor.',
         '',
         '*Como enviar sua lista:*',
-        '• Texto: _2cx Coca-Cola 2L, 1fd Detergente Ypê_',
-        '• Foto da lista ou do pedido',
-        '• Áudio descrevendo os produtos',
+        '- Texto: _2cx Coca-Cola 2L, 1fd Detergente Ypê_',
+        '- Foto da lista ou do pedido',
+        '- Áudio descrevendo os produtos',
         '',
-        'Quando as respostas chegarem, te mando um comparativo com preços e condições para você escolher o melhor fornecedor.',
-        '',
-        '_Pode enviar sua lista agora ou quando precisar!_ 👇',
+        'Pode enviar sua lista agora ou quando precisar.',
       ].join('\n'))
       return { ok: true, etapa: 'concluido' }
     }
