@@ -469,7 +469,7 @@ async function handleMensagemRepresentante({ rep, message, type, mediaId, mimeTy
 // ── Rep atualiza catálogo ─────────────────────────────────────────────
 
 async function handleAtualizacaoCatalogo({ rep, message, type, mediaId, mimeType }) {
-  await sendText(rep.telefone, '📥 Recebi sua tabela! Processando os preços...')
+  await sendText(rep.telefone, 'Recebido! Processando...')
 
   try {
     const extraido = await extrairCatalogo({ tipo: type, texto: message, mediaId, mimeType })
@@ -482,11 +482,13 @@ async function handleAtualizacaoCatalogo({ rep, message, type, mediaId, mimeType
     const resultado = await upsertCatalogoEmLote(rep.id, extraido.itens, type === 'texto' ? 'whatsapp' : type)
 
     const msgs = [
-      `*Catálogo atualizado!*`,
+      `*Catalogo atualizado!*`,
       ``,
-      `${resultado.inseridos} produto(s) novo(s) adicionados`,
-      `${resultado.atualizados} produto(s) com preço atualizado`,
-    ]
+      `${resultado.inseridos > 0 ? `${resultado.inseridos} novo(s) produto(s) adicionado(s)` : ''}`,
+      `${resultado.atualizados > 0 ? `${resultado.atualizados} produto(s) com preco atualizado` : ''}`,
+      ``,
+      `Agora, a IA do Kota responde automaticamente suas proximas cotacoes.`,
+    ].filter(l => l !== '')
 
     if (resultado.erros.length) {
       msgs.push(`${resultado.erros.length} item(ns) com erro — não foram salvos`)
@@ -502,8 +504,6 @@ async function handleAtualizacaoCatalogo({ rep, message, type, mediaId, mimeType
         msgs.push(`${seta} ${al.produto}: R$ ${al.preco_anterior?.toFixed(2)} → R$ ${al.preco_novo?.toFixed(2)} (${sinal}${al.variacao_pct}%)`)
       }
     }
-
-    msgs.push(``, `Seus preços serão usados automaticamente nas próximas cotações. 🚀`)
 
     await sendText(rep.telefone, msgs.join('\n'))
 

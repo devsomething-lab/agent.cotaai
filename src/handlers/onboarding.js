@@ -63,9 +63,9 @@ async function iniciarSeleçãoPerfil(telefone) {
   }, { onConflict: 'telefone' })
 
   await sendText(telefone, [
-    '👋 Olá! Bem-vindo ao *Kota*.',
+    'Ola! Bem-vindo ao *Kota*.',
     '',
-    'Somos o primeiro agente de cotação com IA do Brasil — conectamos comerciantes e representantes para fechar negócios direto pelo WhatsApp, em minutos.',
+    'Conectamos comerciantes e representantes para cotações mais ágeis e inteligentes com IA, direto no WhatsApp.',
     '',
     'Você é:',
     '1. Comerciante — quero cotar produtos',
@@ -81,7 +81,7 @@ async function processarSelecaoPerfil(telefone, sessao, message) {
     await supabase.from('onboarding_sessoes')
       .update({ tipo: 'comerciante', etapa: 'aguardando_nome', atualizado_em: new Date().toISOString() })
       .eq('telefone', telefone)
-    await sendText(telefone, 'Ótimo! Vamos criar seu cadastro rapidinho. 😊\n\nQual é o seu nome?')
+    await sendText(telefone, 'Otimo! Vamos criar seu cadastro. Qual é o seu nome?')
     return { ok: true }
   }
 
@@ -89,7 +89,7 @@ async function processarSelecaoPerfil(telefone, sessao, message) {
     await supabase.from('onboarding_sessoes')
       .update({ tipo: 'representante', etapa: 'aguardando_nome', atualizado_em: new Date().toISOString() })
       .eq('telefone', telefone)
-    await sendText(telefone, 'Ótimo! Vamos cadastrar você como representante. 😊\n\nQual é o seu nome?')
+    await sendText(telefone, 'Otimo! Vamos criar seu cadastro. Qual é o seu nome?')
     return { ok: true }
   }
 
@@ -109,7 +109,7 @@ async function iniciarOnboardingRep(telefone) {
     atualizado_em: new Date().toISOString(),
   }, { onConflict: 'telefone' })
 
-  await sendText(telefone, 'Ótimo! Vamos cadastrar você como representante. 😊\n\nQual é o seu nome?')
+  await sendText(telefone, 'Otimo! Vamos criar seu cadastro. Qual é o seu nome?')
   return { ok: true, etapa: 'aguardando_nome' }
 }
 
@@ -126,7 +126,7 @@ async function processarEtapaRep(telefone, sessao, message) {
       await supabase.from('onboarding_sessoes')
         .update({ nome: texto, etapa: 'aguardando_empresa', atualizado_em: new Date().toISOString() })
         .eq('telefone', telefone)
-      await sendText(telefone, `Prazer, *${texto}*! Qual é o nome da sua empresa ou distribuidora?`)
+      await sendText(telefone, `Prazer, *${texto}*! Qual é o nome da sua empresa?`)
       return { ok: true }
     }
     case 'aguardando_empresa': {
@@ -167,7 +167,7 @@ async function processarEtapaRep(telefone, sessao, message) {
         .eq('telefone', telefone)
 
       await sendText(telefone, [
-        `*Cadastro concluído! Bem-vindo ao Kota, ${s.nome}.*`,
+        `*Cadastro concluido! Bem-vindo ao Kota, ${s.nome}.*`,
         '',
         `*${s.empresa}*`,
         `Entrega: ${s.prazo_entrega_dias} dia(s) · Pagamento: ${diasPg === 0 ? 'à vista' : `${diasPg} dias`}`,
@@ -175,13 +175,14 @@ async function processarEtapaRep(telefone, sessao, message) {
         'A partir de agora você receberá pedidos de cotação aqui no WhatsApp.',
         '',
         '*Como funciona:*',
-        '• Com catálogo cadastrado → as cotações recebidas são respondidas automaticamente e você é notificado',
-        '• Sem catálogo → você recebe as cotações e responde por mensagem',
+        '• Com catálogo → cotações respondidas automaticamente pela IA, com notificações no WhatsApp',
+        '• Sem catálogo → você recebe as cotações e responde direto pelo WhatsApp',
         '',
-        '*Próximo passo:* envie seu catálogo para ativar as respostas automáticas.',
+        '*Proximo passo:* envie seu catálogo para ativar as respostas automáticas.',
         'Pode enviar como:',
         '- Planilha Excel (.xlsx) — em anexo um template para preencher',
-        '- Lista em texto (ex: _Coca-Cola 2L · R$ 8,50 · pgto 30d_)',
+        '- Arquivo PDF',
+        '- Lista em texto (ex: _Coca-Cola 2L R$ 8,50_)',
         '- Foto da tabela impressa',
       ].join('\n'))
 
@@ -212,7 +213,7 @@ async function iniciarOnboardingComerciantge(telefone) {
     atualizado_em: new Date().toISOString(),
   }, { onConflict: 'telefone' })
 
-  await sendText(telefone, 'Ótimo! Vamos criar seu cadastro rapidinho. 😊\n\nQual é o seu nome?')
+  await sendText(telefone, 'Otimo! Vamos criar seu cadastro. Qual é o seu nome?')
   return { ok: true, etapa: 'aguardando_nome' }
 }
 
@@ -250,15 +251,15 @@ async function processarEtapaComerciantge(telefone, sessao, message) {
         'Me manda a lista de produtos que você precisa comprar e eu cuido do resto.',
         '',
         '*Como funciona:*',
-        '• Com catálogo cadastrado → as cotações recebidas são respondidas automaticamente e você é notificado',
-        '• Sem catálogo → você recebe as cotações e responde por mensagem',
+        '• Com catálogo → cotações respondidas automaticamente pela IA, com notificações no WhatsApp',
+        '• Sem catálogo → você recebe as cotações e responde direto pelo WhatsApp',
         '',
         'Nos dois casos você recebe um comparativo com preços e condições para escolher o melhor fornecedor.',
         '',
         '*Como enviar sua lista:*',
         '- Texto: _2cx Coca-Cola 2L, 1fd Detergente Ypê_',
         '- Foto da lista ou do pedido',
-        '- Áudio descrevendo os produtos',
+        '- Audio descrevendo os produtos',
         '',
         'Pode enviar sua lista agora ou quando precisar.',
       ].join('\n'))
