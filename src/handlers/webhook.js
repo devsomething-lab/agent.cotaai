@@ -482,12 +482,12 @@ async function handleAtualizacaoCatalogo({ rep, message, type, mediaId, mimeType
     const resultado = await upsertCatalogoEmLote(rep.id, extraido.itens, type === 'texto' ? 'whatsapp' : type)
 
     const msgs = [
-      `*Catalogo atualizado!*`,
+      `*Catálogo atualizado!*`,
       ``,
       `${resultado.inseridos > 0 ? `${resultado.inseridos} novo(s) produto(s) adicionado(s)` : ''}`,
-      `${resultado.atualizados > 0 ? `${resultado.atualizados} produto(s) com preco atualizado` : ''}`,
+      `${resultado.atualizados > 0 ? `${resultado.atualizados} produto(s) com preço atualizado` : ''}`,
       ``,
-      `Agora, a IA do Kota responde automaticamente suas proximas cotacoes.`,
+      `Agora, a IA do Kota responde automaticamente suas próximas cotações.`,
     ].filter(l => l !== '')
 
     if (resultado.erros.length) {

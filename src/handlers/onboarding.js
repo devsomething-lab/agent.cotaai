@@ -63,7 +63,7 @@ async function iniciarSeleçãoPerfil(telefone) {
   }, { onConflict: 'telefone' })
 
   await sendText(telefone, [
-    'Ola! Bem-vindo ao *Kota*.',
+    'Olá! Bem-vindo ao *Kota*.',
     '',
     'Conectamos comerciantes e representantes para cotações mais ágeis e inteligentes com IA, direto no WhatsApp.',
     '',
@@ -81,7 +81,7 @@ async function processarSelecaoPerfil(telefone, sessao, message) {
     await supabase.from('onboarding_sessoes')
       .update({ tipo: 'comerciante', etapa: 'aguardando_nome', atualizado_em: new Date().toISOString() })
       .eq('telefone', telefone)
-    await sendText(telefone, 'Otimo! Vamos criar seu cadastro. Qual é o seu nome?')
+    await sendText(telefone, 'Ótimo! Vamos criar seu cadastro. Qual é o seu nome?')
     return { ok: true }
   }
 
@@ -89,7 +89,7 @@ async function processarSelecaoPerfil(telefone, sessao, message) {
     await supabase.from('onboarding_sessoes')
       .update({ tipo: 'representante', etapa: 'aguardando_nome', atualizado_em: new Date().toISOString() })
       .eq('telefone', telefone)
-    await sendText(telefone, 'Otimo! Vamos criar seu cadastro. Qual é o seu nome?')
+    await sendText(telefone, 'Ótimo! Vamos criar seu cadastro. Qual é o seu nome?')
     return { ok: true }
   }
 
@@ -109,7 +109,7 @@ async function iniciarOnboardingRep(telefone) {
     atualizado_em: new Date().toISOString(),
   }, { onConflict: 'telefone' })
 
-  await sendText(telefone, 'Otimo! Vamos criar seu cadastro. Qual é o seu nome?')
+  await sendText(telefone, 'Ótimo! Vamos criar seu cadastro. Qual é o seu nome?')
   return { ok: true, etapa: 'aguardando_nome' }
 }
 
@@ -167,7 +167,7 @@ async function processarEtapaRep(telefone, sessao, message) {
         .eq('telefone', telefone)
 
       await sendText(telefone, [
-        `*Cadastro concluido! Bem-vindo ao Kota, ${s.nome}.*`,
+        `*Cadastro concluído! Bem-vindo ao Kota, ${s.nome}.*`,
         '',
         `*${s.empresa}*`,
         `Entrega: ${s.prazo_entrega_dias} dia(s) · Pagamento: ${diasPg === 0 ? 'à vista' : `${diasPg} dias`}`,
@@ -178,7 +178,7 @@ async function processarEtapaRep(telefone, sessao, message) {
         '• Com catálogo → cotações respondidas automaticamente pela IA, com notificações no WhatsApp',
         '• Sem catálogo → você recebe as cotações e responde direto pelo WhatsApp',
         '',
-        '*Proximo passo:* envie seu catálogo para ativar as respostas automáticas.',
+        '*Próximo passo:* envie seu catálogo para ativar as respostas automáticas.',
         'Pode enviar como:',
         '- Planilha Excel (.xlsx) — em anexo um template para preencher',
         '- Arquivo PDF',
@@ -213,7 +213,7 @@ async function iniciarOnboardingComerciantge(telefone) {
     atualizado_em: new Date().toISOString(),
   }, { onConflict: 'telefone' })
 
-  await sendText(telefone, 'Otimo! Vamos criar seu cadastro. Qual é o seu nome?')
+  await sendText(telefone, 'Ótimo! Vamos criar seu cadastro. Qual é o seu nome?')
   return { ok: true, etapa: 'aguardando_nome' }
 }
 
@@ -259,7 +259,7 @@ async function processarEtapaComerciantge(telefone, sessao, message) {
         '*Como enviar sua lista:*',
         '- Texto: _2cx Coca-Cola 2L, 1fd Detergente Ypê_',
         '- Foto da lista ou do pedido',
-        '- Audio descrevendo os produtos',
+        '- Áudio descrevendo os produtos',
         '',
         'Pode enviar sua lista agora ou quando precisar.',
       ].join('\n'))
