@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from '../db/client.js'
 import { downloadMedia } from '../services/whatsapp.js'
+import { parsePrazoLocal, normalizarItensCatalogoEmLote } from './interpretar.js'
 import 'dotenv/config'
 
 const client = new Anthropic()
@@ -243,7 +244,21 @@ Formato:
   const json = raw.replace(/```json|```/g, '').trim()
 
   try {
-    return JSON.parse(json)
+    const parsed = JSON.parse(json)
+
+    // Aplica condições gerais de prazo nos itens que não têm valor específico
+    if (parsed.prazo_pagamento_geral != null || parsed.prazo_entrega_geral != null) {
+      parsed.itens = parsed.itens.map(it => ({
+        ...it,
+        prazo_pagamento_dias: it.prazo_pagamento_dias ?? parsed.prazo_pagamento_geral,
+        prazo_entrega_dias:   it.prazo_entrega_dias   ?? parsed.prazo_entrega_geral,
+      }))
+    }
+
+    // Normaliza prazos e unidades ambíguos via IA (safety net)
+    parsed.itens = await normalizarItensCatalogoEmLote(parsed.itens)
+
+    return parsed
   } catch {
     throw new Error(`IA retornou JSON inválido na estruturação de resposta: ${raw.slice(0, 200)}`)
   }

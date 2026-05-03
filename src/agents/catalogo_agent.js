@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { downloadMedia } from '../services/whatsapp.js'
 import * as XLSX from 'xlsx'
+import { normalizarItensCatalogoEmLote } from './interpretar.js'
 import 'dotenv/config'
 
 const client = new Anthropic()
@@ -173,6 +174,9 @@ export async function extrairCatalogo(mensagem) {
       }
     }
 
+    // Normaliza prazo e unidade via IA para valores ambíguos
+    parsed.itens = await normalizarItensCatalogoEmLote(parsed.itens)
+
     return parsed
   } catch {
     throw new Error(`IA retornou JSON inválido: ${raw.slice(0, 200)}`)
@@ -183,9 +187,123 @@ export async function extrairCatalogo(mensagem) {
 
 async function extrairCatalogoDeExcel(mediaId) {
   const { buffer } = await downloadMedia(mediaId)
-  const wb = XLSX.read(buffer)
+  const wb = XLSX.read(buffer, { cellDates: true }) // força Date objects nativos
   const ws = wb.Sheets[wb.SheetNames[0]]
-  const linhas = XLSX.utils.sheet_to_json(ws, { defval: null })
+
+  // raw: false → SheetJS formata datas como string ISO (YYYY-MM-DD)
+  // cellDates: true no read + raw: false no json = datas seguras sem problema de timezone
+  const linhas = XLSX.utils.sheet_to_json(ws, {
+    defval:  null,
+    raw:     false,
+    dateNF:  'yyyy-mm-dd',  // garante formato ISO independente do locale
+  })
+
+  if (!linhas.length) throw new Error('Planilha vazia ou formato não reconhecido')
+
+  const amostra = linhas.slice(0, 5)
+  const colunas = Object.keys(linhas[0] ?? {})
+
+  const system = `Você é um especialista em tabelas de preços de distribuidoras brasileiras.
+
+Dado um array JSON com as primeiras linhas de uma planilha Excel, mapeie as colunas para os campos:
+produto, marca, unidade, sku, preco_unitario, prazo_pagamento_dias, prazo_entrega_dias, valido_ate
+
+Colunas disponíveis: ${JSON.stringify(colunas)}
+Amostra das primeiras linhas: ${JSON.stringify(amostra)}
+
+RETORNE APENAS JSON:
+{
+  "mapeamento": {
+    "produto": "nome_da_coluna_ou_null",
+    "marca": "nome_da_coluna_ou_null",
+    "unidade": "nome_da_coluna_ou_null",
+    "sku": "nome_da_coluna_ou_null",
+    "preco_unitario": "nome_da_coluna_ou_null",
+    "prazo_pagamento_dias": "nome_da_coluna_ou_null",
+    "prazo_entrega_dias": "nome_da_coluna_ou_null",
+    "valido_ate": "nome_da_coluna_ou_null"
+  }
+}`
+
+  const resp = await client.messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 512,
+    system,
+    messages: [{ role: 'user', content: 'Mapeie as colunas desta planilha.' }],
+  })
+
+  const mapa = JSON.parse(resp.content[0].text.replace(/```json|```/g, '').trim()).mapeamento
+
+  // Coleta valores brutos de valido_ate para normalização por IA em lote
+  const valoresData = mapa.valido_ate
+    ? linhas.filter(l => l[mapa.produto] != null && l[mapa.valido_ate] != null)
+            .map(l => l[mapa.valido_ate])
+    : []
+
+  // Normalização por IA: interpreta qualquer formato de data em lote (safety net)
+  const datasNormalizadas = await normalizarDatasComIA(valoresData)
+
+  let dataIndex = 0
+  const itens = linhas
+    .filter(l => l[mapa.produto] != null)
+    .map(l => {
+      const temData = mapa.valido_ate && l[mapa.valido_ate] != null
+      const valido_ate = temData ? datasNormalizadas[dataIndex++] : null
+      return {
+        produto:              String(l[mapa.produto] ?? '').trim(),
+        marca:                mapa.marca             ? limparString(l[mapa.marca])   : null,
+        unidade:              mapa.unidade            ? limparString(l[mapa.unidade]) : null,
+        sku:                  mapa.sku               ? limparString(l[mapa.sku])     : null,
+        preco_unitario:       mapa.preco_unitario     ? parsePreco(l[mapa.preco_unitario]) : null,
+        prazo_pagamento_dias: mapa.prazo_pagamento_dias ? parseInt(l[mapa.prazo_pagamento_dias]) || null : null,
+        prazo_entrega_dias:   mapa.prazo_entrega_dias   ? parseInt(l[mapa.prazo_entrega_dias]) || null : null,
+        valido_ate,
+      }
+    })
+    .filter(it => it.produto && it.preco_unitario != null)
+
+  // Normaliza prazo e unidade via IA para valores que o parse local não reconheceu
+  const itensNormalizados = await normalizarItensCatalogoEmLote(itens)
+
+  return { itens: itensNormalizados, tipo_documento: 'tabela_precos', confianca: 'alta' }
+}
+
+// ── Normalização de datas por IA ──────────────────────────────────────
+// Recebe array de valores brutos (qualquer formato) e retorna YYYY-MM-DD ou null
+// Chamada única em lote para minimizar custo e latência
+
+async function normalizarDatasComIA(valores) {
+  if (!valores.length) return []
+
+  // Tenta parse local primeiro para evitar chamada desnecessária à IA
+  const resultados = valores.map(parseData)
+  const precisamIA = resultados.some(r => r === null || r === '1970-01-01')
+
+  if (!precisamIA) return resultados
+
+  try {
+    const resp = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 200,
+      system: `Converta cada valor do array para o formato YYYY-MM-DD.
+Aceite qualquer formato: DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD, timestamps ISO, serial Excel, etc.
+Se um valor não for uma data válida ou for claramente inválido (ex: 1970-01-01), retorne null para ele.
+RETORNE APENAS um array JSON sem texto adicional. Ex: ["2026-05-07", null, "2025-12-31"]`,
+      messages: [{ role: 'user', content: JSON.stringify(valores) }],
+    })
+    const raw = resp.content[0].text.replace(/```json|```/g, '').trim()
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed) && parsed.length === valores.length) {
+      console.log('[normalizarDatasComIA] datas corrigidas via IA:', parsed)
+      return parsed
+    }
+  } catch (err) {
+    console.warn('[normalizarDatasComIA] fallback para parse local:', err.message)
+  }
+
+  // Fallback: retorna parse local (pode ter nulls)
+  return resultados.map(r => (r === '1970-01-01' ? null : r))
+}
 
   if (!linhas.length) throw new Error('Planilha vazia ou formato não reconhecido')
 
@@ -227,9 +345,9 @@ RETORNE APENAS JSON:
     .filter(l => l[mapa.produto] != null)
     .map(l => ({
       produto:              String(l[mapa.produto] ?? '').trim(),
-      marca:                mapa.marca             ? String(l[mapa.marca] ?? '').trim() || null : null,
-      unidade:              mapa.unidade            ? String(l[mapa.unidade] ?? '').trim() || null : null,
-      sku:                  mapa.sku               ? String(l[mapa.sku] ?? '').trim() || null : null,
+      marca:                mapa.marca             ? limparString(l[mapa.marca])   : null,
+      unidade:              mapa.unidade            ? limparString(l[mapa.unidade]) : null,
+      sku:                  mapa.sku               ? limparString(l[mapa.sku])     : null,
       preco_unitario:       mapa.preco_unitario     ? parsePreco(l[mapa.preco_unitario]) : null,
       prazo_pagamento_dias: mapa.prazo_pagamento_dias ? parseInt(l[mapa.prazo_pagamento_dias]) || null : null,
       prazo_entrega_dias:   mapa.prazo_entrega_dias   ? parseInt(l[mapa.prazo_entrega_dias]) || null : null,
@@ -265,6 +383,14 @@ RETORNE APENAS UMA PALAVRA: catalogo | cotacao | promocao | outro`
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
+// Converte qualquer valor em string limpa, retorna null se vazio ou literal "null"
+function limparString(val) {
+  if (val == null) return null
+  const s = String(val).trim()
+  if (s === '' || s.toLowerCase() === 'null') return null
+  return s
+}
+
 function parsePreco(val) {
   if (val == null) return null
   const str = String(val).replace(/[R$\s]/g, '').replace(',', '.')
@@ -273,11 +399,38 @@ function parsePreco(val) {
 }
 
 function parseData(val) {
-  if (!val) return null
+  if (val == null) return null
   try {
-    const d = new Date(val)
-    if (isNaN(d.getTime())) return null
-    return d.toISOString().split('T')[0]
+    // SheetJS retorna datas do Excel como número serial (ex: 46148)
+    // ou como objeto Date quando raw: false — tratamos os dois casos
+    if (typeof val === 'number') {
+      // Converte serial Excel → Date (epoch Excel: 1 jan 1900)
+      const date = XLSX.SSF.parse_date_code(val)
+      if (!date) return null
+      const m = String(date.m).padStart(2, '0')
+      const d = String(date.d).padStart(2, '0')
+      return `${date.y}-${m}-${d}`
+    }
+
+    if (val instanceof Date) {
+      if (isNaN(val.getTime())) return null
+      return val.toISOString().split('T')[0]
+    }
+
+    const str = String(val).trim()
+    if (!str || str === 'null') return null
+
+    // DD-MM-AAAA ou DD/MM/AAAA (formato do template Kota)
+    const brMatch = str.match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/)
+    if (brMatch) {
+      const [, d, m, a] = brMatch
+      return `${a}-${m}-${d}`
+    }
+
+    // Fallback: AAAA-MM-DD (ISO)
+    const iso = new Date(str)
+    if (isNaN(iso.getTime())) return null
+    return iso.toISOString().split('T')[0]
   } catch {
     return null
   }
