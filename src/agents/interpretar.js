@@ -45,7 +45,7 @@ export function parsePrazoLocal(val) {
 const UNIDADES_MAPA = {
   cx: 'caixa', cxa: 'caixa', caixa: 'caixa', box: 'caixa',
   fd: 'fardo', fdo: 'fardo', fardo: 'fardo',
-  pct: 'pacote', pct.: 'pacote', pacote: 'pacote', pac: 'pacote',
+  pct: 'pacote', pacote: 'pacote', pac: 'pacote',
   un: 'unidade', und: 'unidade', unid: 'unidade', unidade: 'unidade', pc: 'unidade',
   lt: 'lata', lata: 'lata', lts: 'lata',
   gf: 'garrafa', garrafa: 'garrafa', grf: 'garrafa',
