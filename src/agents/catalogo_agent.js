@@ -305,59 +305,6 @@ RETORNE APENAS um array JSON sem texto adicional. Ex: ["2026-05-07", null, "2025
   return resultados.map(r => (r === '1970-01-01' ? null : r))
 }
 
-  if (!linhas.length) throw new Error('Planilha vazia ou formato não reconhecido')
-
-  const amostra = linhas.slice(0, 5)
-  const colunas = Object.keys(linhas[0] ?? {})
-
-  const system = `Você é um especialista em tabelas de preços de distribuidoras brasileiras.
-
-Dado um array JSON com as primeiras linhas de uma planilha Excel, mapeie as colunas para os campos:
-produto, marca, unidade, sku, preco_unitario, prazo_pagamento_dias, prazo_entrega_dias, valido_ate
-
-Colunas disponíveis: ${JSON.stringify(colunas)}
-Amostra das primeiras linhas: ${JSON.stringify(amostra)}
-
-RETORNE APENAS JSON:
-{
-  "mapeamento": {
-    "produto": "nome_da_coluna_ou_null",
-    "marca": "nome_da_coluna_ou_null",
-    "unidade": "nome_da_coluna_ou_null",
-    "sku": "nome_da_coluna_ou_null",
-    "preco_unitario": "nome_da_coluna_ou_null",
-    "prazo_pagamento_dias": "nome_da_coluna_ou_null",
-    "prazo_entrega_dias": "nome_da_coluna_ou_null",
-    "valido_ate": "nome_da_coluna_ou_null"
-  }
-}`
-
-  const resp = await client.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 512,
-    system,
-    messages: [{ role: 'user', content: 'Mapeie as colunas desta planilha.' }],
-  })
-
-  const mapa = JSON.parse(resp.content[0].text.replace(/```json|```/g, '').trim()).mapeamento
-
-  const itens = linhas
-    .filter(l => l[mapa.produto] != null)
-    .map(l => ({
-      produto:              String(l[mapa.produto] ?? '').trim(),
-      marca:                mapa.marca             ? limparString(l[mapa.marca])   : null,
-      unidade:              mapa.unidade            ? limparString(l[mapa.unidade]) : null,
-      sku:                  mapa.sku               ? limparString(l[mapa.sku])     : null,
-      preco_unitario:       mapa.preco_unitario     ? parsePreco(l[mapa.preco_unitario]) : null,
-      prazo_pagamento_dias: mapa.prazo_pagamento_dias ? parseInt(l[mapa.prazo_pagamento_dias]) || null : null,
-      prazo_entrega_dias:   mapa.prazo_entrega_dias   ? parseInt(l[mapa.prazo_entrega_dias]) || null : null,
-      valido_ate:           mapa.valido_ate          ? parseData(l[mapa.valido_ate]) : null,
-    }))
-    .filter(it => it.produto && it.preco_unitario != null)
-
-  return { itens, tipo_documento: 'tabela_precos', confianca: 'alta' }
-}
-
 // ── Detecta se mensagem do rep é tabela de preços ou resposta de cotação
 
 export async function classificarMensagemRep(texto) {
