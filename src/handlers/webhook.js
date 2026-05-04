@@ -358,40 +358,53 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
 
   const itens = itensInseridos.data
 
-  // Confirma lista ao comerciante — limita a 4096 chars (limite Meta)
-  const LIMITE_CHARS = 3800 // margem de segurança
+  // Confirma lista ao comerciante — quebra em múltiplas mensagens se necessário
+  const LIMITE_CHARS = 3800
   const totalItens = extraido.itens.length
   const temSugestoes = extraido.itens.some(it => it.obs?.includes('histórico'))
-  const rodapeHistorico = temSugestoes
-    ? '\n_Quantidades com (sugestão) são baseadas no seu histórico._'
-    : ''
 
-  let resumo = extraido.itens.map((it, i) => {
+  const linhas = extraido.itens.map((it, i) => {
     const marca = it.marca ? ` (${it.marca})` : ''
     const un = it.unidade ? ` – ${it.unidade}` : ''
     const sufixo = it.obs?.includes('histórico') ? ' _(sugestão)_' : ''
     return `${i + 1}. ${it.produto}${marca}${un} × ${it.quantidade ?? 1}${sufixo}`
-  }).join('\n')
+  })
 
-  let msgConfirmacao
-  const cabecalho = `*Entendi sua lista — ${totalItens} produto(s):*\n\n`
-  const rodape = `\n${rodapeHistorico}\nVerificando catálogos dos representantes...`
-
-  if ((cabecalho + resumo + rodape).length <= LIMITE_CHARS) {
-    msgConfirmacao = cabecalho + resumo + rodape
-  } else {
-    // Lista grande: mostra só os primeiros itens + contagem
-    let resumoTruncado = ''
-    for (const linha of resumo.split('\n')) {
-      if ((cabecalho + resumoTruncado + linha + '\n').length > LIMITE_CHARS - 100) break
-      resumoTruncado += linha + '\n'
+  // Agrupa linhas em blocos respeitando o limite da Meta
+  const blocosMensagem = []
+  let blocoAtual = ''
+  for (const linha of linhas) {
+    if ((blocoAtual + '\n' + linha).length > LIMITE_CHARS) {
+      blocosMensagem.push(blocoAtual.trim())
+      blocoAtual = linha
+    } else {
+      blocoAtual += (blocoAtual ? '\n' : '') + linha
     }
-    const itensExibidos = resumoTruncado.trim().split('\n').length
-    msgConfirmacao = cabecalho + resumoTruncado.trim() +
-      `\n... e mais ${totalItens - itensExibidos} produto(s)` + rodape
+  }
+  if (blocoAtual) blocosMensagem.push(blocoAtual.trim())
+
+  // Envia primeira mensagem com cabeçalho
+  const cabecalho = `*Entendi sua lista — ${totalItens} produto(s):*\n\n`
+  await sendText(phone, cabecalho + blocosMensagem[0])
+
+  // Envia blocos intermediários
+  for (let i = 1; i < blocosMensagem.length - 1; i++) {
+    await sendText(phone, blocosMensagem[i])
   }
 
-  await sendText(phone, msgConfirmacao)
+  // Envia último bloco com rodapé
+  const rodape = [
+    temSugestoes ? '_Quantidades com (sugestão) são baseadas no seu histórico._' : '',
+    '',
+    'Verificando catálogos dos representantes...',
+  ].filter(Boolean).join('\n')
+
+  const ultimoBloco = blocosMensagem.length > 1 ? blocosMensagem[blocosMensagem.length - 1] : ''
+  if (ultimoBloco) {
+    await sendText(phone, ultimoBloco + '\n\n' + rodape)
+  } else {
+    await sendText(phone, rodape)
+  }
 
   // ── Tenta cotação automática ──────────────────────────────────────
   const { repsAutomaticos, repsManuais, itensSemCobertura, modo } =
