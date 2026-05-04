@@ -52,30 +52,80 @@ async function buscarHistoricoQuantidades(comercianteId, produtos) {
 
 // ── Extração de lista de produtos (multimodal) ────────────────────────
 
-export async function extrairListaProdutos(mensagem, opcoes = {}) {
-  /**
-   * mensagem = {
-   *   tipo: 'texto' | 'foto' | 'audio' | 'pdf' | 'planilha',
-   *   texto: string | null,
-   *   mediaId: string | null,
-   *   mimeType: string | null,
-   * }
-   * opcoes = {
-   *   comercianteId: string | null  // Feature 5: para buscar histórico de quantidades
-   * }
-   * Retorna: { itens: [{produto, marca, unidade, quantidade, obs}], raw_interpretado }
-   */
+const SYSTEM_EXTRACAO = `Você é um assistente especializado em extrair listas de produtos de comerciantes brasileiros do setor de atacado e varejo.
 
-  // Feature 5: busca histórico de quantidades antes de processar a lista
+Sua tarefa é identificar TODOS os produtos mencionados e estruturá-los em JSON.
+
+ABREVIAÇÕES DO ATACADO BRASILEIRO — interprete todas:
+- cx = caixa
+- fd = fardo
+- pct = pacote
+- un / und = unidade
+- dp = display (embalagem de exposição, ex: display de balas)
+- dz = dúzia (12 unidades)
+- ct = cartela ou cento (100 unidades)
+- lt = lata
+- gf = garrafa
+- kg = quilograma
+- g = gramas
+- ml / mk = mililitros (mk é erro de digitação comum para ml)
+- l = litro
+- sc = saco
+- bd = bandeja
+- balde = balde
+- vidro = vidro (embalagem)
+- sachê / sachet = sachê
+- rolo = rolo
+
+NORMALIZAÇÃO DE PRODUTOS:
+- Mantenha o nome próximo ao original mas corrigindo abreviações óbvias
+- "det" → "Detergente", "sab" → "Sabão" ou "Sabonete" (pelo contexto), "deso" → "Desodorante"
+- "amaciante" → "Amaciante", "choc" → "Chocolate", "bisc" → "Biscoito"
+- Inclua a gramatura/volume quando mencionado: "500ml", "1kg", "200g"
+- Marca: extraia se mencionada (ex: "Ypê", "Nivea", "Doriana"), senão null
+
+REGRAS GERAIS:
+- Se a quantidade não for mencionada, use 1
+- Retorne APENAS o JSON, sem texto adicional, sem markdown
+- Processe TODOS os itens da lista sem pular nenhum`
+
+const FORMATO_SAIDA = `
+Formato de saída:
+{
+  "itens": [
+    {
+      "produto": "Nome do produto normalizado",
+      "marca": "Marca ou null",
+      "unidade": "caixa/fardo/display/dúzia/cartela/pacote/unidade/kg/lata/garrafa ou null",
+      "quantidade": número,
+      "obs": "observação adicional ou null"
+    }
+  ],
+  "raw_interpretado": "resumo breve do que foi interpretado",
+  "tem_quantidades_sugeridas": false
+}`
+
+// Quebra lista de texto em blocos de ~50 itens para listas grandes
+function chunkarLista(texto, tamanhoPorcao = 50) {
+  const linhas = texto.split('\n').filter(l => l.trim())
+  if (linhas.length <= tamanhoPorcao) return [texto]
+
+  const blocos = []
+  for (let i = 0; i < linhas.length; i += tamanhoPorcao) {
+    blocos.push(linhas.slice(i, i + tamanhoPorcao).join('\n'))
+  }
+  return blocos
+}
+
+export async function extrairListaProdutos(mensagem, opcoes = {}) {
+  // Feature 5: busca histórico de quantidades
   let historicoQuantidades = {}
   let temHistorico = false
   if (opcoes.comercianteId) {
-    // Extrai nomes de produtos da mensagem de forma simples para pré-busca
     historicoQuantidades = await buscarHistoricoQuantidades(opcoes.comercianteId, [])
     temHistorico = Object.keys(historicoQuantidades).length > 0
   }
 
-  // Feature 5: instrução condicional de histórico no prompt
   const instrucaoHistorico = temHistorico ? `
 HISTÓRICO DE COMPRAS DO COMERCIANTE (últimos 90 dias):
 ${Object.entries(historicoQuantidades)
@@ -86,113 +136,119 @@ Regra especial: Se um produto da lista NÃO tiver quantidade informada E aparece
 use a quantidade do histórico como sugestão e adicione obs: "quantidade sugerida pelo histórico".
 Se não estiver no histórico e não tiver quantidade, use 1.` : ''
 
-  const systemPrompt = `Você é um assistente especializado em extrair listas de produtos de mensagens de comerciantes brasileiros.
+  const systemPrompt = SYSTEM_EXTRACAO + instrucaoHistorico + FORMATO_SAIDA
 
-Sua tarefa é identificar TODOS os produtos mencionados e estruturá-los em JSON.
-
-Regras:
-- Interprete abreviações comuns do varejo: "cx" = caixa, "fd" = fardo, "pct" = pacote, "un" = unidade, "kg" = quilograma, "lt" = lata, "gf" = garrafa
-- Se a marca não for mencionada, deixe null
-- Se a unidade/embalagem não for mencionada, deixe null
-- Se a quantidade não for mencionada, use 1
-- Normalize nomes de produtos: "coca" → "Coca-Cola", "leite ninho" → "Leite Ninho"
-- Para áudios transcritos, extraia apenas os produtos citados
-- Retorne APENAS o JSON, sem texto adicional
-${instrucaoHistorico}
-
-Formato de saída:
-{
-  "itens": [
-    {
-      "produto": "Nome do produto normalizado",
-      "marca": "Marca ou null",
-      "unidade": "caixa/fardo/pacote/unidade/kg/lata/garrafa ou null",
-      "quantidade": número,
-      "obs": "observação adicional ou null"
-    }
-  ],
-  "raw_interpretado": "resumo do que foi interpretado",
-  "tem_quantidades_sugeridas": true | false
-}`
-
-  const userContent = []
-
-  if (mensagem.texto) {
-    userContent.push({ type: 'text', text: `Lista do comerciante:\n${mensagem.texto}` })
-  }
-
+  // ── Mídia (foto/pdf) — processa direto sem chunking ──────────────────
   if (mensagem.mediaId && mensagem.tipo !== 'audio') {
     try {
       const { buffer, mimeType: resolvedMime } = await downloadMedia(mensagem.mediaId)
       mensagem.mimeType = resolvedMime ?? mensagem.mimeType
       const base64 = buffer.toString('base64')
+      const userContent = []
 
       if (mensagem.tipo === 'foto') {
-        userContent.push({
-          type: 'image',
-          source: { type: 'base64', media_type: mensagem.mimeType || 'image/jpeg', data: base64 },
-        })
+        userContent.push({ type: 'image', source: { type: 'base64', media_type: mensagem.mimeType || 'image/jpeg', data: base64 } })
         userContent.push({ type: 'text', text: 'Extraia todos os produtos visíveis nesta imagem.' })
       } else if (mensagem.tipo === 'pdf') {
-        userContent.push({
-          type: 'document',
-          source: { type: 'base64', media_type: 'application/pdf', data: base64 },
-        })
+        userContent.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } })
         userContent.push({ type: 'text', text: 'Extraia todos os produtos listados neste documento.' })
       }
+
+      const response = await client.messages.create({
+        model: 'claude-sonnet-4-5', max_tokens: 8192,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userContent }],
+      })
+      return parsearRespostaIA(response.content[0].text, temHistorico, historicoQuantidades)
     } catch (err) {
-      console.error('[extrairListaProdutos] erro ao baixar mídia:', err.message)
+      console.error('[extrairListaProdutos] erro mídia:', err.message)
+      throw err
     }
   }
 
-  if (userContent.length === 0) {
-    throw new Error('Nenhum conteúdo para processar')
+  // ── Texto — chunking para listas grandes ─────────────────────────────
+  if (!mensagem.texto) throw new Error('Nenhum conteúdo para processar')
+
+  const blocos = chunkarLista(mensagem.texto)
+  console.log(`[extrairListaProdutos] ${blocos.length} bloco(s) para processar (${mensagem.texto.split('\n').filter(l=>l.trim()).length} linhas)`)
+
+  if (blocos.length === 1) {
+    // Lista pequena — chamada única
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-5', max_tokens: 8192,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: `Lista do comerciante:\n${mensagem.texto}` }],
+    })
+    return parsearRespostaIA(response.content[0].text, temHistorico, historicoQuantidades)
   }
 
-  const response = await client.messages.create({
-    model: 'claude-sonnet-4-5',
-    max_tokens: 2048,
-    system: systemPrompt,
-    messages: [{ role: 'user', content: userContent }],
-  })
+  // Lista grande — processa em paralelo e mescla
+  console.log(`[extrairListaProdutos] lista grande: processando ${blocos.length} blocos em paralelo`)
+  const promises = blocos.map((bloco, i) =>
+    client.messages.create({
+      model: 'claude-sonnet-4-5', max_tokens: 8192,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: `Lista do comerciante (parte ${i + 1} de ${blocos.length}):\n${bloco}` }],
+    })
+  )
 
-  const raw = response.content[0].text.trim()
-  const json = raw.replace(/```json|```/g, '').trim()
+  const respostas = await Promise.all(promises)
+  const itensMesclados = []
 
+  for (const resp of respostas) {
+    try {
+      const resultado = parsearRespostaIA(resp.content[0].text, false, {})
+      itensMesclados.push(...(resultado.itens ?? []))
+    } catch (err) {
+      console.warn('[extrairListaProdutos] erro em bloco, continuando:', err.message)
+    }
+  }
+
+  if (!itensMesclados.length) throw new Error('Nenhum item extraído da lista')
+
+  // Aplica histórico sobre resultado mesclado
+  const resultado = {
+    itens: itensMesclados,
+    raw_interpretado: `${itensMesclados.length} produtos extraídos em ${blocos.length} blocos`,
+    tem_quantidades_sugeridas: false,
+  }
+  return aplicarHistorico(resultado, temHistorico, historicoQuantidades)
+}
+
+// ── Helpers internos ──────────────────────────────────────────────────
+
+function parsearRespostaIA(text, temHistorico, historicoQuantidades) {
+  const json = text.trim().replace(/```json|```/g, '').trim()
   try {
     const resultado = JSON.parse(json)
-
-    // Feature 5: segunda passagem — para itens sem quantidade que batem com histórico
-    // (fallback caso a IA não tenha usado o histórico corretamente)
-    if (temHistorico && resultado.itens) {
-      resultado.itens = resultado.itens.map(item => {
-        if (item.quantidade !== 1 || item.obs?.includes('histórico')) return item
-
-        // Tenta encontrar este produto no histórico
-        const keyItem = (item.produto ?? '').toLowerCase().trim()
-        const match = Object.entries(historicoQuantidades).find(([hProd]) =>
-          keyItem.includes(hProd) || hProd.includes(keyItem) ||
-          keyItem.split(' ').some(w => w.length > 3 && hProd.includes(w))
-        )
-
-        if (match) {
-          const [, hist] = match
-          return {
-            ...item,
-            quantidade: hist.quantidade_sugerida,
-            obs: item.obs
-              ? `${item.obs}; quantidade sugerida pelo histórico`
-              : `quantidade sugerida pelo histórico (${hist.frequencia}x nos últimos 90 dias)`,
-          }
-        }
-        return item
-      })
-    }
-
-    return resultado
+    return aplicarHistorico(resultado, temHistorico, historicoQuantidades)
   } catch {
-    throw new Error(`IA retornou JSON inválido: ${raw.slice(0, 200)}`)
+    throw new Error(`IA retornou JSON inválido: ${json.slice(0, 200)}`)
   }
+}
+
+function aplicarHistorico(resultado, temHistorico, historicoQuantidades) {
+  if (!temHistorico || !resultado.itens) return resultado
+  resultado.itens = resultado.itens.map(item => {
+    if (item.quantidade !== 1 || item.obs?.includes('histórico')) return item
+    const keyItem = (item.produto ?? '').toLowerCase().trim()
+    const match = Object.entries(historicoQuantidades).find(([hProd]) =>
+      keyItem.includes(hProd) || hProd.includes(keyItem) ||
+      keyItem.split(' ').some(w => w.length > 3 && hProd.includes(w))
+    )
+    if (match) {
+      const [, hist] = match
+      return {
+        ...item,
+        quantidade: hist.quantidade_sugerida,
+        obs: item.obs
+          ? `${item.obs}; quantidade sugerida pelo histórico`
+          : `quantidade sugerida pelo histórico (${hist.frequencia}x nos últimos 90 dias)`,
+      }
+    }
+    return item
+  })
+  return resultado
 }
 
 // ── Estruturação da resposta do representante ─────────────────────────

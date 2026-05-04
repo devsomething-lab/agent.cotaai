@@ -316,7 +316,17 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
   try {
     extraido = await extrairListaProdutos(mensagemParaIA, { comercianteId: comerciante.id })
   } catch (err) {
-    await sendText(phone, 'Não consegui interpretar sua lista. Tente em texto: "2 cx Coca-Cola 2L, 1 fardo Leite Ninho"')
+    console.error('[webhook] erro ao extrair lista:', err.message)
+    await sendText(phone, [
+      'Não consegui processar sua lista. Tente novamente ou envie em outro formato:',
+      '',
+      '• Foto da lista escrita ou impressa',
+      '• Arquivo PDF',
+      '',
+      'Se preferir por texto, envie um item por linha:',
+      '_2cx Coca-Cola 2L_',
+      '_1fd Detergente Ypê 500ml_',
+    ].join('\n'))
     return { ok: false }
   }
 
