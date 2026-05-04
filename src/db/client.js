@@ -33,7 +33,7 @@ export async function findOrCreateComercianteByTelefone(telefone, nome = null) {
 export async function findRepresentanteByTelefone(telefone) {
   const { data } = await supabase
     .from('representantes')
-    .select('*')           // inclui prazo_entrega_padrao_dias e prazo_pagamento_padrao_dias
+    .select('*')
     .eq('telefone', telefone)
     .single()
   return data
@@ -42,19 +42,13 @@ export async function findRepresentanteByTelefone(telefone) {
 export async function getAllRepresentantesAtivos() {
   const { data, error } = await supabase
     .from('representantes')
-    .select('*')           // inclui campos de prazo padrão
+    .select('*')
     .eq('ativo', true)
     .order('nome')
   if (error) throw error
   return data
 }
 
-/**
- * Resolve o prazo de entrega com hierarquia:
- * 1. Valor informado na proposta/cotação (proposta ou catálogo)
- * 2. Prazo padrão do cadastro do representante
- * 3. Fallback fixo
- */
 export function resolverPrazoEntrega(prazoInformado, rep, fallback = 3) {
   return prazoInformado ?? rep?.prazo_entrega_padrao_dias ?? fallback
 }
