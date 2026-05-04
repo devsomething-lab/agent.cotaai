@@ -358,21 +358,40 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
 
   const itens = itensInseridos.data
 
-  // Confirma lista ao comerciante
-  const resumo = extraido.itens.map((it, i) => {
+  // Confirma lista ao comerciante — limita a 4096 chars (limite Meta)
+  const LIMITE_CHARS = 3800 // margem de segurança
+  const totalItens = extraido.itens.length
+  const temSugestoes = extraido.itens.some(it => it.obs?.includes('histórico'))
+  const rodapeHistorico = temSugestoes
+    ? '\n_Quantidades com (sugestão) são baseadas no seu histórico._'
+    : ''
+
+  let resumo = extraido.itens.map((it, i) => {
     const marca = it.marca ? ` (${it.marca})` : ''
     const un = it.unidade ? ` – ${it.unidade}` : ''
     const sufixo = it.obs?.includes('histórico') ? ' _(sugestão)_' : ''
     return `${i + 1}. ${it.produto}${marca}${un} × ${it.quantidade ?? 1}${sufixo}`
   }).join('\n')
 
-  // Feature 5: avisa se usou histórico para sugerir quantidades
-  const temSugestoes = extraido.itens.some(it => it.obs?.includes('histórico'))
-  const rodapeHistorico = temSugestoes
-    ? '\n\n_Quantidades marcadas com (sugestão) são baseadas no seu histórico de compras. Pode me enviar a lista com as quantidades corretas se quiser ajustar._'
-    : ''
+  let msgConfirmacao
+  const cabecalho = `*Entendi sua lista — ${totalItens} produto(s):*\n\n`
+  const rodape = `\n${rodapeHistorico}\nVerificando catálogos dos representantes...`
 
-  await sendText(phone, [`*Entendi sua lista:*`, '', resumo, rodapeHistorico, '', 'Verificando catálogos dos representantes...'].join('\n'))
+  if ((cabecalho + resumo + rodape).length <= LIMITE_CHARS) {
+    msgConfirmacao = cabecalho + resumo + rodape
+  } else {
+    // Lista grande: mostra só os primeiros itens + contagem
+    let resumoTruncado = ''
+    for (const linha of resumo.split('\n')) {
+      if ((cabecalho + resumoTruncado + linha + '\n').length > LIMITE_CHARS - 100) break
+      resumoTruncado += linha + '\n'
+    }
+    const itensExibidos = resumoTruncado.trim().split('\n').length
+    msgConfirmacao = cabecalho + resumoTruncado.trim() +
+      `\n... e mais ${totalItens - itensExibidos} produto(s)` + rodape
+  }
+
+  await sendText(phone, msgConfirmacao)
 
   // ── Tenta cotação automática ──────────────────────────────────────
   const { repsAutomaticos, repsManuais, itensSemCobertura, modo } =
