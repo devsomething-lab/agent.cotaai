@@ -40,13 +40,29 @@ const _mensagensProcessadas = new Map() // messageId → timestamp
 function jaProcessada(messageId) {
   if (!messageId) return false
   const agora = Date.now()
-  // Limpa entradas com mais de 60s
   for (const [id, ts] of _mensagensProcessadas) {
     if (agora - ts > 60_000) _mensagensProcessadas.delete(id)
   }
   if (_mensagensProcessadas.has(messageId)) return true
   _mensagensProcessadas.set(messageId, agora)
   return false
+}
+
+// ── Lock por cotação ──────────────────────────────────────────────────
+// Previne race condition quando dois webhooks chegam com ms de diferença
+// e ambos leem obs_interna antes de qualquer um terminar o update no banco.
+
+const _cotacoesEmProcessamento = new Set()
+
+function lockCotacao(cotacaoId) {
+  if (_cotacoesEmProcessamento.has(cotacaoId)) return false
+  _cotacoesEmProcessamento.add(cotacaoId)
+  setTimeout(() => _cotacoesEmProcessamento.delete(cotacaoId), 10_000)
+  return true
+}
+
+function unlockCotacao(cotacaoId) {
+  _cotacoesEmProcessamento.delete(cotacaoId)
 }
 
 // ── Entry point ───────────────────────────────────────────────────────
@@ -239,29 +255,33 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
 
   if (cotacaoAguardandoEscolha && message) {
 
+    // Lock por cotação — descarta segundo request que chegou em paralelo
+    if (!lockCotacao(cotacaoAguardandoEscolha.id)) {
+      console.log(`[webhook] cotação ${cotacaoAguardandoEscolha.id} em processamento — descartando request paralelo`)
+      return { ok: true, skipped: true, reason: 'cotacao_locked' }
+    }
+
+    try {
+
     // ── Passo 2: intenção já confirmada → usuário está escolhendo fornecedor ──
     if (cotacaoAguardandoEscolha.obs_interna === 'confirmando:comprar') {
-      // "0" ou "voltar" → limpa estado e reenvia o comparativo
       if (cmd === '0' || cmd === 'voltar' || cmd === 'voltar ao comparativo') {
         await supabase.from('cotacoes')
           .update({ obs_interna: null })
           .eq('id', cotacaoAguardandoEscolha.id)
         return handleReenviarComparativo(comerciante, cotacaoAguardandoEscolha, phone)
       }
-      // "nova cotação" ou "descartar" → cancela e libera para nova lista
       if (cmd === 'nova cotacao' || cmd === 'nova cotação' || cmd === 'descartar' || cmd === 'cancelar') {
         return handleCancelarParaNovaCotacao(comerciante, cotacaoAguardandoEscolha, phone)
       }
       if (/^\d+$/.test(cmd) || cmd.length > 3) {
         return handleEscolhaFornecedor({ comerciante, cotacao: cotacaoAguardandoEscolha, resposta: message })
       }
-      // Resposta não reconhecida: repete a lista de fornecedores
       return handlePedirEscolhaFornecedor(comerciante, cotacaoAguardandoEscolha, phone)
     }
 
     // ── Passo 1: resposta de intenção (1 / 2 / 3) ────────────────────────────
     if (cmd === '1' || cmd === 'comprar' || cmd === 'comprar agora') {
-      // Seta estado para aguardar escolha de fornecedor
       await supabase.from('cotacoes')
         .update({ obs_interna: 'confirmando:comprar' })
         .eq('id', cotacaoAguardandoEscolha.id)
@@ -290,9 +310,11 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
     if (cmd === '4' || cmd === 'nova cotacao' || cmd === 'nova cotação' || cmd === 'descartar') {
       return handleCancelarParaNovaCotacao(comerciante, cotacaoAguardandoEscolha, phone)
     }
-    // Número ou nome direto sem ter respondido intenção — trata como escolha imediata
     if (/^\d+$/.test(cmd) || cmd.length > 3) {
       return handleEscolhaFornecedor({ comerciante, cotacao: cotacaoAguardandoEscolha, resposta: message })
+    }
+    } finally {
+      unlockCotacao(cotacaoAguardandoEscolha.id)
     }
   }
 
