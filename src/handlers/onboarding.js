@@ -1,7 +1,7 @@
 import { supabase } from '../db/client.js'
 import { sendText, sendDocument } from '../services/whatsapp.js'
-import { gerarCodigoConvite, getCotacoesAbertasSemRep, criarVinculo } from '../db/vinculos.js'
-import { templateCotacaoParaRep } from '../services/whatsapp.js'
+import { criarVinculo } from '../db/vinculos.js'
+import { findRepresentanteByTelefone } from '../db/client.js'
 
 const TEMPLATE_CATALOGO_URL = process.env.TEMPLATE_CATALOGO_URL ?? null
 
@@ -35,7 +35,12 @@ export async function handleAutocadastro(telefone, message) {
   const sessao = await getSessaoOnboarding(telefone)
 
   if (!sessao) {
+    // Auto-cadastro direto de representante
     if (texto === 'cadastro' || texto === 'cadastrar') {
+      return iniciarOnboardingRep(telefone)
+    }
+    // Resposta ao convite do comerciante
+    if (texto === 'sim' || texto === 'ok' || texto === 'quero') {
       return iniciarOnboardingRep(telefone)
     }
     return iniciarSeleçãoPerfil(telefone)
@@ -134,7 +139,19 @@ async function processarEtapaRep(telefone, sessao, message) {
     case 'aguardando_empresa': {
       if (texto.length < 2) { await sendText(telefone, 'Informe o nome da empresa.'); return { ok: true } }
       await supabase.from('onboarding_sessoes')
-        .update({ empresa: texto, etapa: 'aguardando_prazo_entrega', atualizado_em: new Date().toISOString() })
+        .update({ empresa: texto, etapa: 'aguardando_cnpj', atualizado_em: new Date().toISOString() })
+        .eq('telefone', telefone)
+      await sendText(telefone, `Qual é o CNPJ da empresa?\n\nEx: _12.345.678/0001-90_`)
+      return { ok: true }
+    }
+    case 'aguardando_cnpj': {
+      const cnpjFinal = normalizarCNPJ(texto)
+      if (!cnpjFinal) {
+        await sendText(telefone, 'CNPJ inválido. Informe os 14 dígitos corretamente.\n\nEx: _12.345.678/0001-90_')
+        return { ok: true }
+      }
+      await supabase.from('onboarding_sessoes')
+        .update({ cnpj: cnpjFinal, etapa: 'aguardando_prazo_entrega', atualizado_em: new Date().toISOString() })
         .eq('telefone', telefone)
       await sendText(telefone, `Qual é o seu prazo de entrega padrão (em dias)?\n\nEx: _2_ para 2 dias úteis`)
       return { ok: true }
@@ -159,7 +176,7 @@ async function processarEtapaRep(telefone, sessao, message) {
       }
       const { data: s } = await supabase.from('onboarding_sessoes').select('*').eq('telefone', telefone).single()
       const { data: rep, error } = await supabase.from('representantes').upsert({
-        nome: s.nome, empresa: s.empresa, telefone,
+        nome: s.nome, empresa: s.empresa, cnpj: s.cnpj ?? null, telefone,
         prazo_entrega_padrao_dias: s.prazo_entrega_dias,
         prazo_pagamento_padrao_dias: diasPg, ativo: true,
       }, { onConflict: 'telefone' }).select().single()
@@ -172,6 +189,7 @@ async function processarEtapaRep(telefone, sessao, message) {
         `*Cadastro concluído! Bem-vindo ao Kota, ${s.nome}.*`,
         '',
         `*${s.empresa}*`,
+        s.cnpj ? `CNPJ: ${formatarCNPJ(s.cnpj)}` : '',
         `Entrega: ${s.prazo_entrega_dias} dia(s) · Pagamento: ${diasPg === 0 ? 'à vista' : `${diasPg} dias`}`,
         '',
         'A partir de agora você receberá pedidos de cotação aqui no WhatsApp.',
@@ -188,7 +206,6 @@ async function processarEtapaRep(telefone, sessao, message) {
         '- Foto da tabela impressa',
       ].join('\n'))
 
-      // Envia template Excel se URL configurada
       if (TEMPLATE_CATALOGO_URL) {
         await sendDocument(
           telefone,
@@ -198,45 +215,32 @@ async function processarEtapaRep(telefone, sessao, message) {
         )
       }
 
-      // Gera código de convite e envia
-      const codigo = await gerarCodigoConvite(rep.id)
-      await sendText(telefone, [
-        `*Seu código de convite: ${codigo}*`,
-        '',
-        'Compartilhe com seus clientes para que eles te adicionem como fornecedor.',
-        'Eles devem enviar para o Kota: _fornecedor ${codigo}_',
-        '',
-        'Ou envie o número de telefone deles para o Kota: _cliente 11999990001_',
-      ].join('\n'))
-
-      // Verifica cotações abertas nas últimas 48h e envia ao rep
+      // Verifica convites pendentes de comerciantes e cria vínculos automaticamente
       try {
-        const cotacoesAbertas = await getCotacoesAbertasSemRep(rep.id)
-        if (cotacoesAbertas.length > 0) {
-          await sendText(telefone, [
-            `Há ${cotacoesAbertas.length} cotação(ões) em aberto aguardando resposta.`,
-            'Enviando agora...',
-          ].join('\n'))
+        const { data: convitesPendentes } = await supabase
+          .from('convites_pendentes')
+          .select('comerciante_id, comerciantes(nome, empresa, telefone)')
+          .eq('telefone_fornecedor', telefone)
+          .eq('aceito', false)
 
-          for (const cotacao of cotacoesAbertas) {
-            // Cria vínculo com o comerciante da cotação
-            await criarVinculo(cotacao.comerciante_id, rep.id)
+        for (const convite of convitesPendentes ?? []) {
+          await criarVinculo(convite.comerciante_id, rep.id)
+          await supabase.from('convites_pendentes')
+            .update({ aceito: true })
+            .eq('comerciante_id', convite.comerciante_id)
+            .eq('telefone_fornecedor', telefone)
 
-            // Adiciona ao cotacao_envios e envia
-            await supabase.from('cotacao_envios').insert({
-              cotacao_id:       cotacao.id,
-              representante_id: rep.id,
-              modo_resposta:    'manual',
-              status:           'aguardando',
-              enviado_em:       new Date().toISOString(),
-            })
-
-            const msgCotacao = templateCotacaoParaRep(cotacao.cotacao_itens ?? [], cotacao.id)
-            await sendText(telefone, msgCotacao)
+          // Notifica o comerciante que o rep concluiu o cadastro
+          const com = convite.comerciantes
+          if (com?.telefone) {
+            await sendText(com.telefone, [
+              `*${s.nome}* (${s.empresa}) concluiu o cadastro no Kota e está vinculado como seu fornecedor.`,
+              'Você já pode cotá-los na sua próxima lista.',
+            ].join('\n'))
           }
         }
       } catch (err) {
-        console.warn('[onboarding] erro ao buscar cotações abertas:', err.message)
+        console.warn('[onboarding] erro ao processar convites pendentes:', err.message)
       }
 
       return { ok: true, repId: rep.id }
@@ -280,17 +284,35 @@ async function processarEtapaComerciantge(telefone, sessao, message) {
     case 'aguardando_empresa': {
       if (texto.length < 2) { await sendText(telefone, 'Informe o nome do estabelecimento.'); return { ok: true } }
       const { data: s } = await supabase.from('onboarding_sessoes').select('*').eq('telefone', telefone).single()
-      await supabase.from('comerciantes')
-        .update({ nome: s.nome, empresa: texto })
-        .eq('telefone', telefone)
       await supabase.from('onboarding_sessoes')
-        .update({ empresa: texto, etapa: 'concluido', atualizado_em: new Date().toISOString() })
+        .update({ empresa: texto, etapa: 'aguardando_cnpj', atualizado_em: new Date().toISOString() })
+        .eq('telefone', telefone)
+      await sendText(telefone, `Qual é o CNPJ do estabelecimento?\n\nEx: _12.345.678/0001-90_`)
+      return { ok: true }
+    }
+    case 'aguardando_cnpj': {
+      const cnpjFinal = normalizarCNPJ(texto)
+      if (!cnpjFinal) {
+        await sendText(telefone, 'CNPJ inválido. Informe os 14 dígitos corretamente.\n\nEx: _12.345.678/0001-90_')
+        return { ok: true }
+      }
+      await supabase.from('onboarding_sessoes')
+        .update({ cnpj: cnpjFinal, etapa: 'cadastrando_fornecedores', atualizado_em: new Date().toISOString() })
         .eq('telefone', telefone)
 
+      // Busca dados atualizados da sessão para salvar no banco
+      const { data: s2 } = await supabase.from('onboarding_sessoes').select('*').eq('telefone', telefone).single()
+      const { data: comerciante } = await supabase.from('comerciantes')
+        .update({ nome: s2.nome, empresa: s2.empresa, cnpj: cnpjFinal })
+        .eq('telefone', telefone)
+        .select()
+        .single()
+
       await sendText(telefone, [
-        `*Tudo pronto! Bem-vindo ao Kota, ${s.nome}.*`,
+        `*Tudo pronto! Bem-vindo ao Kota, ${s2.nome}.*`,
         '',
-        `*${texto}* está pronto para cotar.`,
+        `*${s2.empresa}*`,
+        cnpjFinal ? `CNPJ: ${formatarCNPJ(cnpjFinal)}` : '',
         '',
         'Me manda a lista de produtos que você precisa comprar e eu cuido do resto.',
         '',
@@ -299,16 +321,127 @@ async function processarEtapaComerciantge(telefone, sessao, message) {
         '• Sem catálogo → você recebe as cotações e responde direto pelo WhatsApp',
         '',
         'Nos dois casos você recebe um comparativo com preços e condições para escolher o melhor fornecedor.',
+      ].filter(l => l !== '').join('\n'))
+
+      await sendText(telefone, [
+        'Agora vamos cadastrar seus fornecedores.',
         '',
-        '*Como enviar sua lista:*',
-        '- Texto: _2cx Coca-Cola 2L, 1fd Detergente Ypê_',
-        '- Foto da lista ou do pedido',
-        '- Áudio descrevendo os produtos',
+        'Envie o *número de WhatsApp* de cada fornecedor (um por mensagem).',
+        'Quando terminar, envie *pronto*.',
         '',
-        'Pode enviar sua lista agora ou quando precisar.',
+        'Ex: _11999990001_',
       ].join('\n'))
-      return { ok: true, etapa: 'concluido' }
+
+      return { ok: true }
+    }
+    case 'cadastrando_fornecedores': {
+      if (['pronto', 'ok', 'finalizar', 'fim', 'encerrar'].includes(texto.toLowerCase())) {
+        await supabase.from('onboarding_sessoes')
+          .update({ etapa: 'concluido', atualizado_em: new Date().toISOString() })
+          .eq('telefone', telefone)
+        await sendText(telefone, [
+          'Perfeito! Seus fornecedores foram cadastrados.',
+          '',
+          'Quando eles concluírem o cadastro no Kota, o vínculo é criado automaticamente e você já pode cotá-los.',
+          '',
+          'Pode enviar sua lista de produtos quando precisar.',
+        ].join('\n'))
+        return { ok: true }
+      }
+
+      // Interpreta como telefone de fornecedor
+      const telFornecedor = texto.replace(/\D/g, '')
+      if (telFornecedor.length < 8) {
+        await sendText(telefone, [
+          'Número inválido. Envie o WhatsApp do fornecedor (só números):',
+          '_11999990001_',
+          '',
+          'Quando terminar, envie *pronto*.',
+        ].join('\n'))
+        return { ok: true }
+      }
+
+      return handleConvidarFornecedor(telefone, telFornecedor)
     }
     default: return null
   }
+}
+
+// ── Helpers de CNPJ ───────────────────────────────────────────────────
+
+function normalizarCNPJ(valor) {
+  const digits = (valor ?? '').replace(/\D/g, '')
+  if (digits.length !== 14) return null
+  // Validação dos dígitos verificadores
+  const calc = (v, n) => {
+    let sum = 0, pos = n - 7
+    for (let i = n; i >= 1; i--) {
+      sum += parseInt(v[n - i]) * pos--
+      if (pos < 2) pos = 9
+    }
+    const r = sum % 11
+    return r < 2 ? 0 : 11 - r
+  }
+  if (calc(digits, 12) !== parseInt(digits[12])) return null
+  if (calc(digits, 13) !== parseInt(digits[13])) return null
+  return digits
+}
+
+function formatarCNPJ(digits) {
+  if (!digits || digits.length !== 14) return digits ?? ''
+  return `${digits.slice(0,2)}.${digits.slice(2,5)}.${digits.slice(5,8)}/${digits.slice(8,12)}-${digits.slice(12)}`
+}
+
+export async function handleConvidarFornecedor(telefoneComerciant, telefoneFornecedor) {
+  const { data: comerciante } = await supabase
+    .from('comerciantes')
+    .select('*')
+    .eq('telefone', telefoneComerciant)
+    .single()
+  if (!comerciante) return { ok: false }
+
+  // Verifica se rep já existe no Kota
+  const rep = await findRepresentanteByTelefone(telefoneFornecedor)
+
+  if (rep) {
+    // Já cadastrado — cria vínculo direto
+    await criarVinculo(comerciante.id, rep.id)
+
+    await sendText(telefoneComerciant, [
+      `*${rep.nome}* (${rep.empresa ?? ''}) já está no Kota e foi vinculado como seu fornecedor.`,
+      'Ele receberá suas cotações automaticamente.',
+      '',
+      'Envie o próximo número ou *pronto* para encerrar.',
+    ].join('\n'))
+
+    await sendText(telefoneFornecedor, [
+      `*${comerciante.nome ?? 'Um comerciante'}* (${comerciante.empresa ?? ''}) adicionou você como cliente no Kota.`,
+      'Você receberá as cotações desse cliente automaticamente.',
+    ].join('\n'))
+  } else {
+    // Não cadastrado — salva convite pendente e envia convite
+    await supabase.from('convites_pendentes').upsert({
+      comerciante_id:    comerciante.id,
+      telefone_fornecedor: telefoneFornecedor,
+      aceito:            false,
+      criado_em:         new Date().toISOString(),
+    }, { onConflict: 'comerciante_id,telefone_fornecedor', ignoreDuplicates: true })
+
+    await sendText(telefoneFornecedor, [
+      `*${comerciante.nome ?? 'Um comerciante'}* (${comerciante.empresa ?? ''}) convidou você para o *Kota*.`,
+      '',
+      'O Kota é um agente de cotação com IA — seus clientes enviam listas de produtos e você recebe as cotações automaticamente, direto pelo WhatsApp.',
+      '',
+      'Para começar seu cadastro como representante, responda *sim*.',
+    ].join('\n'))
+
+    await sendText(telefoneComerciant, [
+      `Convite enviado para *${telefoneFornecedor}*.`,
+      'Quando o fornecedor concluir o cadastro, o vínculo é criado automaticamente.',
+      '',
+      'Envie o próximo número ou *pronto* para encerrar.',
+    ].join('\n'))
+  }
+
+  return { ok: true }
 }
