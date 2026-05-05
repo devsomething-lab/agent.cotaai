@@ -10,9 +10,26 @@ import { sendText, sendTextOrTemplate, downloadMedia, normalizeMetaPayload,
          templateCotacaoParaRep, templateComparativo, templatePedidoConfirmado } from '../services/whatsapp.js'
 import * as XLSX from 'xlsx'
 import { handleAutocadastro, getSessaoOnboarding, handleOnboardingComerciantge, getSessaoOnboardingComerciantge } from './onboarding.js'
+import { criarVinculo, removerVinculo, getRepresentantesVinculados, getComerciantesVinculados,
+         findRepByCodigoConvite, gerarCodigoConvite } from '../db/vinculos.js'
 import 'dotenv/config'
 
 const TIMEOUT_HORAS = parseInt(process.env.COTACAO_TIMEOUT_HORAS ?? '24')
+
+// ── Estado transiente para fluxos de vínculo ─────────────────────────
+// Guarda por 5min o que o usuário está fazendo (adicionar fornecedor/cliente)
+const _estadosVinculo = new Map() // phone → { acao, expiresAt }
+
+function setEstadoVinculo(phone, acao) {
+  _estadosVinculo.set(phone, { acao, expiresAt: Date.now() + 5 * 60_000 })
+}
+function getEstadoVinculo(phone) {
+  const estado = _estadosVinculo.get(phone)
+  if (!estado) return null
+  if (Date.now() > estado.expiresAt) { _estadosVinculo.delete(phone); return null }
+  return estado
+}
+function clearEstadoVinculo(phone) { _estadosVinculo.delete(phone) }
 
 // ── Deduplicação de webhooks ──────────────────────────────────────────
 // Meta Cloud API pode entregar o mesmo webhook 2x em rápida sucessão.
@@ -138,8 +155,47 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
 
   const comerciante = await findOrCreateComercianteByTelefone(phone)
 
+  // ── Estado transiente: aguardando telefone do fornecedor ─────────────
+  const estadoAtual = getEstadoVinculo(phone)
+  if (estadoAtual?.acao === 'aguardando_telefone_fornecedor' && type === 'texto') {
+    clearEstadoVinculo(phone)
+    return handleVincularRepPorTelefone(comerciante, phone, message.trim())
+  }
+
   // ── Comandos naturais ──────────────────────────────────────────────
   const cmd = msgLower.trim()
+
+  // Vincular fornecedor por código de convite: "fornecedor ABC123"
+  const matchCodigo = cmd.match(/^fornecedor\s+([a-z0-9]{6})$/i)
+  if (matchCodigo) {
+    return handleVincularRepPorCodigo(comerciante, phone, matchCodigo[1])
+  }
+
+  // Vincular fornecedor por telefone: "fornecedor 11999990001"
+  const matchTelefone = cmd.match(/^fornecedor\s+([\d\s\-\+]+)$/)
+  if (matchTelefone) {
+    const tel = matchTelefone[1].replace(/[\s\-\+]/g, '')
+    return handleVincularRepPorTelefone(comerciante, phone, tel)
+  }
+
+  // Listar fornecedores vinculados
+  if (cmd === 'meus fornecedores' || cmd === 'fornecedores') {
+    return handleListarFornecedores(comerciante, phone)
+  }
+
+  // Iniciar fluxo de adicionar fornecedor
+  if (cmd === 'adicionar fornecedor' || cmd === 'novo fornecedor' || cmd === 'add fornecedor') {
+    setEstadoVinculo(phone, 'aguardando_telefone_fornecedor')
+    await sendText(phone, [
+      'Qual o telefone ou código do fornecedor?',
+      '',
+      '• Telefone: _11999990001_',
+      '• Código de convite: _ABC123_',
+      '',
+      'Envie *cancelar* para desistir.',
+    ].join('\n'))
+    return { ok: true }
+  }
 
   if (cmd === 'minha cotacao' || cmd === 'minha cotação' || cmd === 'cotacao' || cmd === 'cotação') {
     return handleVerCotacaoAtual(comerciante, phone)
@@ -408,7 +464,7 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
 
   // ── Tenta cotação automática ──────────────────────────────────────
   const { repsAutomaticos, repsManuais, itensSemCobertura, modo } =
-    await resolverCotacaoAutomatica(cotacao.id, itens)
+    await resolverCotacaoAutomatica(cotacao.id, itens, comerciante.id)
 
   // Salva propostas automáticas
   for (const { rep, propostas } of repsAutomaticos) {
@@ -462,6 +518,63 @@ async function handleMensagemRepresentante({ rep, message, type, mediaId, mimeTy
   // Sem texto e sem mídia → pede formato correto
   if (!message && !mediaId) {
     await sendText(rep.telefone, 'Envie sua tabela de preços (Excel, PDF, foto) ou responda a cotação em texto.')
+    return { ok: true }
+  }
+
+  const cmd = (message ?? '').trim().toLowerCase()
+
+  // ── Estado transiente: aguardando telefone do cliente ────────────────
+  const estadoAtual = getEstadoVinculo(rep.telefone)
+  if (estadoAtual?.acao === 'aguardando_telefone_cliente' && type === 'texto') {
+    clearEstadoVinculo(rep.telefone)
+    return handleVincularComerciantePorTelefone(rep, message.trim())
+  }
+
+  // ── Comandos de vínculo do representante ─────────────────────────────
+
+  // Vincular comerciante por telefone: "cliente 11999990001"
+  const matchCliente = cmd.match(/^cliente\s+([\d\s\-\+]+)$/)
+  if (matchCliente) {
+    const tel = matchCliente[1].replace(/[\s\-\+]/g, '')
+    return handleVincularComerciantePorTelefone(rep, tel)
+  }
+
+  // Listar clientes vinculados
+  if (cmd === 'meus clientes' || cmd === 'clientes') {
+    return handleListarClientes(rep)
+  }
+
+  // Adicionar cliente
+  if (cmd === 'adicionar cliente' || cmd === 'novo cliente' || cmd === 'add cliente') {
+    setEstadoVinculo(rep.telefone, 'aguardando_telefone_cliente')
+    await sendText(rep.telefone, [
+      'Qual o telefone do cliente?',
+      '',
+      'Ex: _11999990001_',
+      '',
+      'Envie *cancelar* para desistir.',
+    ].join('\n'))
+    return { ok: true }
+  }
+
+  // Meu código de convite
+  if (cmd === 'meu codigo' || cmd === 'meu código' || cmd === 'codigo' || cmd === 'código' || cmd === 'convite') {
+    const codigo = await gerarCodigoConvite(rep.id)
+    await sendText(rep.telefone, [
+      `*Seu código de convite: ${codigo}*`,
+      '',
+      'Compartilhe com seus clientes. Eles devem enviar para o Kota:',
+      `_fornecedor ${codigo}_`,
+      '',
+      'Ou informe seu telefone para eles adicionarem diretamente.',
+    ].join('\n'))
+    return { ok: true }
+  }
+
+  // Cancelar fluxo de vínculo
+  if (cmd === 'cancelar') {
+    clearEstadoVinculo(rep.telefone)
+    await sendText(rep.telefone, 'Ok, operação cancelada.')
     return { ok: true }
   }
 
@@ -952,6 +1065,146 @@ async function handlePedirEscolhaFornecedor(comerciante, cotacao, phone) {
 }
 
 // ── Cancelar cotação atual e liberar para nova ────────────────────────
+// ── Handlers de vínculos — Comerciante ───────────────────────────────
+
+async function handleVincularRepPorCodigo(comerciante, phone, codigo) {
+  const rep = await findRepByCodigoConvite(codigo)
+  if (!rep) {
+    await sendText(phone, [
+      `Código *${codigo.toUpperCase()}* não encontrado.`,
+      '',
+      'Confirme o código com seu fornecedor e tente novamente.',
+    ].join('\n'))
+    return { ok: true }
+  }
+  return handleConfirmarVinculoComRep(comerciante, phone, rep)
+}
+
+async function handleVincularRepPorTelefone(comerciante, phone, telefone) {
+  // Normaliza telefone
+  const tel = telefone.replace(/\D/g, '')
+  const { data: rep } = await supabase
+    .from('representantes')
+    .select('*')
+    .eq('telefone', tel)
+    .eq('ativo', true)
+    .single()
+
+  if (!rep) {
+    await sendText(phone, [
+      'Fornecedor não encontrado com esse telefone.',
+      '',
+      'Verifique o número ou peça o código de convite ao fornecedor.',
+    ].join('\n'))
+    return { ok: true }
+  }
+  return handleConfirmarVinculoComRep(comerciante, phone, rep)
+}
+
+async function handleConfirmarVinculoComRep(comerciante, phone, rep) {
+  await criarVinculo(comerciante.id, rep.id)
+
+  await sendText(phone, [
+    `*${rep.nome}* (${rep.empresa ?? ''}) adicionado como fornecedor.`,
+    '',
+    'Nas próximas cotações, ele receberá seus pedidos automaticamente.',
+  ].join('\n'))
+
+  // Notifica o rep
+  await sendText(rep.telefone, [
+    `*${comerciante.nome ?? 'Um comerciante'}* adicionou você como fornecedor no Kota.`,
+    '',
+    'Você receberá as cotações desse cliente automaticamente.',
+  ].join('\n'))
+
+  return { ok: true }
+}
+
+async function handleListarFornecedores(comerciante, phone) {
+  const reps = await getRepresentantesVinculados(comerciante.id)
+
+  if (!reps.length) {
+    await sendText(phone, [
+      'Você ainda não tem fornecedores vinculados.',
+      '',
+      'Para adicionar:',
+      '• Envie _fornecedor CODIGO_ com o código do fornecedor',
+      '• Envie _fornecedor 11999990001_ com o telefone',
+      '• Envie _adicionar fornecedor_ para iniciar o fluxo',
+    ].join('\n'))
+    return { ok: true }
+  }
+
+  const lista = reps.map((r, i) => `${i + 1}. *${r.nome}* — ${r.empresa ?? ''}`).join('\n')
+  await sendText(phone, [
+    `*Seus fornecedores (${reps.length}):*`,
+    '',
+    lista,
+    '',
+    'Para adicionar novo: _adicionar fornecedor_',
+  ].join('\n'))
+  return { ok: true }
+}
+
+// ── Handlers de vínculos — Representante ─────────────────────────────
+
+async function handleVincularComerciantePorTelefone(rep, telefone) {
+  const tel = telefone.replace(/\D/g, '')
+  const { data: comerciante } = await supabase
+    .from('comerciantes')
+    .select('*')
+    .eq('telefone', tel)
+    .single()
+
+  if (!comerciante) {
+    await sendText(rep.telefone, [
+      'Cliente não encontrado com esse telefone.',
+      '',
+      'O cliente precisa estar cadastrado no Kota.',
+    ].join('\n'))
+    return { ok: true }
+  }
+
+  await criarVinculo(comerciante.id, rep.id)
+
+  await sendText(rep.telefone, [
+    `*${comerciante.nome ?? 'Cliente'}* vinculado com sucesso.`,
+    '',
+    'Você receberá as cotações desse cliente automaticamente.',
+  ].join('\n'))
+
+  await sendText(comerciante.telefone, [
+    `*${rep.nome}* (${rep.empresa ?? ''}) foi adicionado como seu fornecedor no Kota.`,
+  ].join('\n'))
+
+  return { ok: true }
+}
+
+async function handleListarClientes(rep) {
+  const comerciantes = await getComerciantesVinculados(rep.id)
+
+  if (!comerciantes.length) {
+    await sendText(rep.telefone, [
+      'Você ainda não tem clientes vinculados.',
+      '',
+      'Para adicionar:',
+      '• Envie _cliente 11999990001_ com o telefone do cliente',
+      '• Compartilhe seu código: envie _meu código_',
+    ].join('\n'))
+    return { ok: true }
+  }
+
+  const lista = comerciantes.map((c, i) => `${i + 1}. *${c.nome ?? c.telefone}*`).join('\n')
+  await sendText(rep.telefone, [
+    `*Seus clientes (${comerciantes.length}):*`,
+    '',
+    lista,
+    '',
+    'Para adicionar novo: _adicionar cliente_',
+  ].join('\n'))
+  return { ok: true }
+}
+
 async function handleCancelarParaNovaCotacao(comerciante, cotacao, phone) {
   await supabase.from('cotacoes')
     .update({ status: 'cancelada', obs_interna: null, fechado_em: new Date().toISOString() })

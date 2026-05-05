@@ -1,5 +1,7 @@
 import { supabase } from '../db/client.js'
 import { sendText, sendDocument } from '../services/whatsapp.js'
+import { gerarCodigoConvite, getCotacoesAbertasSemRep, criarVinculo } from '../db/vinculos.js'
+import { templateCotacaoParaRep } from '../services/whatsapp.js'
 
 const TEMPLATE_CATALOGO_URL = process.env.TEMPLATE_CATALOGO_URL ?? null
 
@@ -195,6 +197,48 @@ async function processarEtapaRep(telefone, sessao, message) {
           'Preencha com seus produtos e preços e envie de volta para mim.'
         )
       }
+
+      // Gera código de convite e envia
+      const codigo = await gerarCodigoConvite(rep.id)
+      await sendText(telefone, [
+        `*Seu código de convite: ${codigo}*`,
+        '',
+        'Compartilhe com seus clientes para que eles te adicionem como fornecedor.',
+        'Eles devem enviar para o Kota: _fornecedor ${codigo}_',
+        '',
+        'Ou envie o número de telefone deles para o Kota: _cliente 11999990001_',
+      ].join('\n'))
+
+      // Verifica cotações abertas nas últimas 48h e envia ao rep
+      try {
+        const cotacoesAbertas = await getCotacoesAbertasSemRep(rep.id)
+        if (cotacoesAbertas.length > 0) {
+          await sendText(telefone, [
+            `Há ${cotacoesAbertas.length} cotação(ões) em aberto aguardando resposta.`,
+            'Enviando agora...',
+          ].join('\n'))
+
+          for (const cotacao of cotacoesAbertas) {
+            // Cria vínculo com o comerciante da cotação
+            await criarVinculo(cotacao.comerciante_id, rep.id)
+
+            // Adiciona ao cotacao_envios e envia
+            await supabase.from('cotacao_envios').insert({
+              cotacao_id:       cotacao.id,
+              representante_id: rep.id,
+              modo_resposta:    'manual',
+              status:           'aguardando',
+              enviado_em:       new Date().toISOString(),
+            })
+
+            const msgCotacao = templateCotacaoParaRep(cotacao.cotacao_itens ?? [], cotacao.id)
+            await sendText(telefone, msgCotacao)
+          }
+        }
+      } catch (err) {
+        console.warn('[onboarding] erro ao buscar cotações abertas:', err.message)
+      }
+
       return { ok: true, repId: rep.id }
     }
     default: return null

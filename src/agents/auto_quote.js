@@ -1,24 +1,32 @@
 import { supabase } from '../db/client.js'
 import { buscarCatalogoPorProduto, normalizarNome } from '../db/catalogo.js'
 import { getAllRepresentantesAtivos } from '../db/client.js'
+import { getRepresentantesVinculados } from '../db/vinculos.js'
 
 // ── Tenta resolver cotação automaticamente via catálogo ───────────────
 
-export async function resolverCotacaoAutomatica(cotacaoId, itens) {
+export async function resolverCotacaoAutomatica(cotacaoId, itens, comercianteId = null) {
   /**
-   * Para cada representante ativo, verifica se tem TODOS os itens no catálogo.
-   * - Se tem todos: gera proposta automática sem perguntar ao representante
-   * - Se tem alguns: gera proposta parcial e marca itens faltantes para perguntar
-   * - Se não tem nenhum: marca como manual
+   * Usa representantes vinculados ao comerciante se existirem.
+   * Fallback para todos os reps ativos se não houver vínculos.
    *
    * Retorna: {
    *   repsAutomaticos: [{ rep, propostas }],
    *   repsManuais: [rep],
-   *   itensSemCobertura: [item]   -- itens que NENHUM rep tem no catálogo
+   *   itensSemCobertura: [item]
    * }
    */
 
-  const reps = await getAllRepresentantesAtivos()
+  let reps = []
+  if (comercianteId) {
+    reps = await getRepresentantesVinculados(comercianteId)
+  }
+  if (!reps.length) {
+    reps = await getAllRepresentantesAtivos()
+  }
+
+  console.log(`[auto_quote] cotacao ${cotacaoId} — ${reps.length} rep(s) (${comercianteId && reps.length ? 'vinculados' : 'todos ativos'})`)
+
   const repsAutomaticos = []
   const repsManuais = []
   const coberturaPorItem = {} // item.id → quantos reps têm
@@ -35,8 +43,6 @@ export async function resolverCotacaoAutomatica(cotacaoId, itens) {
         totalEncontrados++
         coberturaPorItem[item.id] = (coberturaPorItem[item.id] ?? 0) + 1
 
-        // Hierarquia de prazo:
-        // 1º catálogo do produto → 2º cadastro do representante → 3º fallback 3 dias
         const prazoPagamento = melhorMatch.prazo_pagamento_dias
           ?? rep.prazo_pagamento_padrao_dias
           ?? 30
@@ -65,8 +71,8 @@ export async function resolverCotacaoAutomatica(cotacaoId, itens) {
       repsAutomaticos.push({
         rep,
         propostas,
-        cobertura_pct: Math.round((totalEncontrados / itens.length) * 100),
-        total_itens:   itens.length,
+        cobertura_pct:  Math.round((totalEncontrados / itens.length) * 100),
+        total_itens:    itens.length,
         itens_cobertos: totalEncontrados,
       })
     } else {
@@ -74,10 +80,8 @@ export async function resolverCotacaoAutomatica(cotacaoId, itens) {
     }
   }
 
-  // Itens sem cobertura em nenhum rep
   const itensSemCobertura = itens.filter(it => !coberturaPorItem[it.id])
 
-  // Determina o modo da cotação
   let modo = 'manual'
   if (repsAutomaticos.length === reps.length && itensSemCobertura.length === 0) {
     modo = 'automatico'
@@ -85,7 +89,6 @@ export async function resolverCotacaoAutomatica(cotacaoId, itens) {
     modo = 'misto'
   }
 
-  // Atualiza o modo na cotação
   await supabase.from('cotacoes').update({ modo }).eq('id', cotacaoId)
 
   return { repsAutomaticos, repsManuais, itensSemCobertura, modo }
@@ -94,7 +97,6 @@ export async function resolverCotacaoAutomatica(cotacaoId, itens) {
 // ── Salva propostas automáticas no banco ──────────────────────────────
 
 export async function salvarPropostasAutomaticas(cotacaoId, representanteId, propostas) {
-  // Cria o envio marcado como automático
   const { data: envio, error: errEnvio } = await supabase
     .from('cotacao_envios')
     .insert({
@@ -109,7 +111,6 @@ export async function salvarPropostasAutomaticas(cotacaoId, representanteId, pro
 
   if (errEnvio) throw errEnvio
 
-  // Salva as propostas
   const propostasParaInserir = propostas.map(p => ({
     cotacao_envio_id:     envio.id,
     cotacao_id:           cotacaoId,
@@ -136,9 +137,8 @@ export async function salvarPropostasAutomaticas(cotacaoId, representanteId, pro
 function escolherMelhorMatch(matches, item) {
   if (!matches.length) return null
 
-  // Pontuação: nome exato > contém a palavra principal > qualquer match
   const scored = matches.map(m => {
-    const nomeCat = normalizarNome(m.produto)
+    const nomeCat  = normalizarNome(m.produto)
     const nomeItem = normalizarNome(item.produto)
     const palavraPrincipal = nomeItem.split(' ')[0]
 
@@ -148,9 +148,8 @@ function escolherMelhorMatch(matches, item) {
     else if (nomeCat.includes(palavraPrincipal)) score = 60
     else score = 40
 
-    // Bônus se unidade bate
     if (item.unidade && m.unidade) {
-      const uCat = normalizarNome(m.unidade)
+      const uCat  = normalizarNome(m.unidade)
       const uItem = normalizarNome(item.unidade)
       if (uCat === uItem || uCat.includes(uItem) || uItem.includes(uCat)) score += 20
     }
@@ -158,7 +157,6 @@ function escolherMelhorMatch(matches, item) {
     return { ...m, _score: score }
   })
 
-  // Retorna o de maior score, ou null se score muito baixo
   const melhor = scored.sort((a, b) => b._score - a._score)[0]
   return melhor._score >= 40 ? melhor : null
 }
