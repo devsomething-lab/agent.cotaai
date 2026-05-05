@@ -314,13 +314,11 @@ async function processarEtapaComerciantge(telefone, sessao, message) {
         `*${s2.empresa}*`,
         cnpjFinal ? `CNPJ: ${formatarCNPJ(cnpjFinal)}` : '',
         '',
-        'Me manda a lista de produtos que você precisa comprar e eu cuido do resto.',
+        'Agora você tem um agente de IA cuidando das suas compras.',
         '',
         '*Como funciona:*',
-        '• Com catálogo → cotações respondidas automaticamente pela IA, com notificações no WhatsApp',
-        '• Sem catálogo → você recebe as cotações e responde direto pelo WhatsApp',
-        '',
-        'Nos dois casos você recebe um comparativo com preços e condições para escolher o melhor fornecedor.',
+        '• Cadastre seus fornecedores aqui no Kota',
+        '• Envie sua lista de produtos e a IA entra em contato com todos eles, recebe as propostas e te apresenta o melhor preço para você fechar negócio',
       ].filter(l => l !== '').join('\n'))
 
       await sendText(telefone, [
