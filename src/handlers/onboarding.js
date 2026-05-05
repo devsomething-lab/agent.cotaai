@@ -349,22 +349,63 @@ async function processarEtapaComerciantge(telefone, sessao, message) {
         return { ok: true }
       }
 
-      // Interpreta como telefone de fornecedor
-      const telFornecedor = texto.replace(/\D/g, '')
-      if (telFornecedor.length < 8) {
+      // Extrai todos os telefones da mensagem (aceita lista ou número único)
+      const telefonesEncontrados = extrairTelefones(texto)
+      if (!telefonesEncontrados.length) {
         await sendText(telefone, [
           'Número inválido. Envie o WhatsApp do fornecedor (só números):',
           '_11999990001_',
+          '',
+          'Para cadastrar vários de uma vez, envie um por linha:',
+          '_11999990001_',
+          '_47999990002_',
+          '_21999990003_',
           '',
           'Quando terminar, envie *pronto*.',
         ].join('\n'))
         return { ok: true }
       }
 
-      return handleConvidarFornecedor(telefone, telFornecedor)
+      // Processa cada número — silencioso se for lote, normal se for único
+      const emLote = telefonesEncontrados.length > 1
+      if (emLote) {
+        await sendText(telefone, `Processando ${telefonesEncontrados.length} contato(s)...`)
+      }
+      for (const tel of telefonesEncontrados) {
+        await handleConvidarFornecedor(telefone, tel, { silencioso: emLote })
+      }
+      if (emLote) {
+        await sendText(telefone, [
+          `${telefonesEncontrados.length} contato(s) processado(s).`,
+          '',
+          'Envie mais números ou *pronto* para encerrar.',
+        ].join('\n'))
+      }
+      return { ok: true }
     }
     default: return null
   }
+}
+
+// ── Helper: extrai múltiplos telefones de uma mensagem ────────────────
+// Aceita: um por linha, separados por vírgula, espaço ou quebra de linha
+
+function extrairTelefones(texto) {
+  // Separa por quebra de linha, vírgula ou ponto e vírgula
+  const partes = texto.split(/[\n,;]+/)
+  const telefones = []
+  for (const parte of partes) {
+    const digits = parte.replace(/\D/g, '')
+    // Telefone brasileiro: 10-11 dígitos (com DDD) ou 12-13 com código do país
+    if (digits.length >= 10 && digits.length <= 13) {
+      // Normaliza: remove código do país 55 se presente
+      const tel = digits.startsWith('55') && digits.length > 11
+        ? digits.slice(2)
+        : digits
+      if (tel.length >= 10) telefones.push(tel)
+    }
+  }
+  return [...new Set(telefones)] // remove duplicatas
 }
 
 // ── Helpers de CNPJ ───────────────────────────────────────────────────
@@ -392,7 +433,8 @@ function formatarCNPJ(digits) {
   return `${digits.slice(0,2)}.${digits.slice(2,5)}.${digits.slice(5,8)}/${digits.slice(8,12)}-${digits.slice(12)}`
 }
 
-export async function handleConvidarFornecedor(telefoneComerciant, telefoneFornecedor) {
+export async function handleConvidarFornecedor(telefoneComerciant, telefoneFornecedor, opts = {}) {
+  const silencioso = opts.silencioso ?? false
   const { data: comerciante } = await supabase
     .from('comerciantes')
     .select('*')
@@ -404,27 +446,29 @@ export async function handleConvidarFornecedor(telefoneComerciant, telefoneForne
   const rep = await findRepresentanteByTelefone(telefoneFornecedor)
 
   if (rep) {
-    // Já cadastrado — cria vínculo direto
     await criarVinculo(comerciante.id, rep.id)
-
-    await sendText(telefoneComerciant, [
-      `*${rep.nome}* (${rep.empresa ?? ''}) já está no Kota e foi vinculado como seu fornecedor.`,
-      'Ele receberá suas cotações automaticamente.',
-      '',
-      'Envie o próximo número ou *pronto* para encerrar.',
-    ].join('\n'))
-
+    if (!silencioso) {
+      await sendText(telefoneComerciant, [
+        `*${rep.nome}* (${rep.empresa ?? ''}) já está no Kota e foi vinculado como seu fornecedor.`,
+        'Ele receberá suas cotações automaticamente.',
+        '',
+        'Envie o próximo número ou *pronto* para encerrar.',
+      ].join('\n'))
+    } else {
+      await sendText(telefoneComerciant,
+        `*${rep.nome}* (${rep.empresa ?? ''}) vinculado.`
+      )
+    }
     await sendText(telefoneFornecedor, [
       `*${comerciante.nome ?? 'Um comerciante'}* (${comerciante.empresa ?? ''}) adicionou você como cliente no Kota.`,
       'Você receberá as cotações desse cliente automaticamente.',
     ].join('\n'))
   } else {
-    // Não cadastrado — salva convite pendente e envia convite
     await supabase.from('convites_pendentes').upsert({
-      comerciante_id:    comerciante.id,
+      comerciante_id:      comerciante.id,
       telefone_fornecedor: telefoneFornecedor,
-      aceito:            false,
-      criado_em:         new Date().toISOString(),
+      aceito:              false,
+      criado_em:           new Date().toISOString(),
     }, { onConflict: 'comerciante_id,telefone_fornecedor', ignoreDuplicates: true })
 
     await sendText(telefoneFornecedor, [
@@ -435,12 +479,18 @@ export async function handleConvidarFornecedor(telefoneComerciant, telefoneForne
       'Para começar seu cadastro como representante, responda *sim*.',
     ].join('\n'))
 
-    await sendText(telefoneComerciant, [
-      `Convite enviado para *${telefoneFornecedor}*.`,
-      'Quando o fornecedor concluir o cadastro, o vínculo é criado automaticamente.',
-      '',
-      'Envie o próximo número ou *pronto* para encerrar.',
-    ].join('\n'))
+    if (!silencioso) {
+      await sendText(telefoneComerciant, [
+        `Convite enviado para *${telefoneFornecedor}*.`,
+        'Quando o fornecedor concluir o cadastro, o vínculo é criado automaticamente.',
+        '',
+        'Envie o próximo número ou *pronto* para encerrar.',
+      ].join('\n'))
+    } else {
+      await sendText(telefoneComerciant,
+        `Convite enviado para *${telefoneFornecedor}*.`
+      )
+    }
   }
 
   return { ok: true }
