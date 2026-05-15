@@ -195,58 +195,108 @@ async function processarEtapaRep(telefone, sessao, message) {
         `• Prazo médio de entrega: ${s.prazo_entrega_dias} dia(s)`,
         `• Prazo médio de pagamento: ${diasPg === 0 ? 'à vista' : `${diasPg} dias`}`,
         '',
-        'A partir de agora você receberá pedidos de cotação aqui no WhatsApp.',
+        'As informações estão corretas?',
         '',
-        '*Como funciona:*',
-        '• Com catálogo → cotações respondidas automaticamente pela IA, com notificações no WhatsApp',
-        '• Sem catálogo → você recebe as cotações e responde direto pelo WhatsApp',
-        '',
-        '*Próximo passo:* envie seu catálogo para ativar as respostas automáticas.',
-        'Pode enviar como:',
-        '- Planilha Excel (.xlsx) — em anexo um template para preencher',
-        '- Arquivo PDF',
-        '- Lista em texto (ex: _Coca-Cola 2L R$ 8,50_)',
-        '- Foto da tabela impressa',
+        '1. Sim — confirmar cadastro',
+        '2. Não — corrigir informações',
       ].filter(l => l !== '').join('\n'))
 
-      if (TEMPLATE_CATALOGO_URL) {
-        await sendDocument(
-          telefone,
-          TEMPLATE_CATALOGO_URL,
-          'catalogo_kota_template.xlsx',
-          'Preencha com seus produtos e preços e envie de volta para mim.'
-        )
-      }
+      // Salva dados completos na sessão aguardando confirmação
+      await supabase.from('onboarding_sessoes')
+        .update({
+          etapa:               'aguardando_confirmacao_cadastro',
+          prazo_pagamento_dias: diasPg,
+          atualizado_em:       new Date().toISOString(),
+        })
+        .eq('telefone', telefone)
 
-      // Verifica convites pendentes de comerciantes e cria vínculos automaticamente
-      try {
-        const { data: convitesPendentes } = await supabase
-          .from('convites_pendentes')
-          .select('comerciante_id, comerciantes(nome, empresa, telefone)')
-          .eq('telefone_fornecedor', telefone)
-          .eq('aceito', false)
+      // Salva rep provisoriamente (será ativado na confirmação)
+      await supabase.from('representantes').upsert({
+        nome: s.nome, empresa: s.empresa, cnpj: s.cnpj ?? null, telefone,
+        prazo_entrega_padrao_dias:  s.prazo_entrega_dias,
+        prazo_pagamento_padrao_dias: diasPg, ativo: false,
+      }, { onConflict: 'telefone' })
 
-        for (const convite of convitesPendentes ?? []) {
-          await criarVinculo(convite.comerciante_id, rep.id)
-          await supabase.from('convites_pendentes')
-            .update({ aceito: true })
-            .eq('comerciante_id', convite.comerciante_id)
-            .eq('telefone_fornecedor', telefone)
+      return { ok: true }
+    }
+    case 'aguardando_confirmacao_cadastro': {
+      const cmd = texto.toLowerCase()
+      if (cmd === '1' || cmd === 'sim' || cmd === 's') {
+        // Ativa o rep e finaliza
+        const { data: rep } = await supabase.from('representantes')
+          .update({ ativo: true })
+          .eq('telefone', telefone)
+          .select()
+          .single()
+        await supabase.from('onboarding_sessoes')
+          .update({ etapa: 'concluido', atualizado_em: new Date().toISOString() })
+          .eq('telefone', telefone)
 
-          // Notifica o comerciante que o rep concluiu o cadastro
-          const com = convite.comerciantes
-          if (com?.telefone) {
-            await sendText(com.telefone, [
-              `*${s.nome}* (${s.empresa}) concluiu o cadastro no Kota e está vinculado como seu fornecedor.`,
-              'Você já pode cotá-los na sua próxima lista.',
-            ].join('\n'))
+        await sendText(telefone, [
+          'Cadastro confirmado!',
+          '',
+          'A partir de agora você receberá pedidos de cotação aqui no WhatsApp.',
+          '',
+          '*Como funciona:*',
+          '• Com catálogo → cotações respondidas automaticamente pela IA, com notificações no WhatsApp',
+          '• Sem catálogo → você recebe as cotações e responde direto pelo WhatsApp',
+          '',
+          '*Próximo passo:* envie seu catálogo para ativar as respostas automáticas.',
+          'Pode enviar como:',
+          '- Planilha Excel (.xlsx) — em anexo um template para preencher',
+          '- Arquivo PDF',
+          '- Lista em texto (ex: _Coca-Cola 2L R$ 8,50_)',
+          '- Foto da tabela impressa',
+        ].join('\n'))
+
+        if (TEMPLATE_CATALOGO_URL) {
+          await sendDocument(telefone, TEMPLATE_CATALOGO_URL, 'catalogo_kota_template.xlsx',
+            'Preencha com seus produtos e preços e envie de volta para mim.')
+        }
+
+        // Verifica convites pendentes e cria vínculos
+        if (rep) {
+          try {
+            const { data: convitesPendentes } = await supabase
+              .from('convites_pendentes')
+              .select('comerciante_id, comerciantes(nome, empresa, telefone)')
+              .eq('telefone_fornecedor', telefone)
+              .eq('aceito', false)
+            for (const convite of convitesPendentes ?? []) {
+              await criarVinculo(convite.comerciante_id, rep.id)
+              await supabase.from('convites_pendentes')
+                .update({ aceito: true })
+                .eq('comerciante_id', convite.comerciante_id)
+                .eq('telefone_fornecedor', telefone)
+              const com = convite.comerciantes
+              if (com?.telefone) {
+                await sendText(com.telefone, [
+                  `*${rep.nome}* (${rep.empresa}) concluiu o cadastro no Kota e está vinculado como seu fornecedor.`,
+                  'Você já pode cotá-los na sua próxima lista.',
+                ].join('\n'))
+              }
+            }
+          } catch (err) {
+            console.warn('[onboarding] erro ao processar convites pendentes:', err.message)
           }
         }
-      } catch (err) {
-        console.warn('[onboarding] erro ao processar convites pendentes:', err.message)
+        return { ok: true, repId: rep?.id }
       }
 
-      return { ok: true, repId: rep.id }
+      if (cmd === '2' || cmd === 'não' || cmd === 'nao' || cmd === 'n') {
+        // Reinicia o cadastro do rep
+        await supabase.from('representantes').delete().eq('telefone', telefone)
+        await supabase.from('onboarding_sessoes')
+          .update({ etapa: 'aguardando_nome', nome: null, empresa: null, cnpj: null,
+                    prazo_entrega_dias: null, prazo_pagamento_dias: null,
+                    atualizado_em: new Date().toISOString() })
+          .eq('telefone', telefone)
+        await sendText(telefone, 'Tudo bem! Vamos recomeçar.\n\nQual é o seu nome?')
+        return { ok: true }
+      }
+
+      await sendText(telefone, 'Responda com *1* para confirmar ou *2* para corrigir.')
+      return { ok: true }
     }
     default: return null
   }
@@ -319,22 +369,58 @@ async function processarEtapaComerciantge(telefone, sessao, message) {
         `• Estabelecimento: ${s2.empresa}`,
         cnpjFinal ? `• CNPJ: ${formatarCNPJ(cnpjFinal)}` : '',
         '',
-        'Agora você tem um agente de IA cuidando das suas compras.',
+        'As informações estão corretas?',
         '',
-        '*Como funciona:*',
-        '• Cadastre seus fornecedores aqui no Kota',
-        '• Envie sua lista de produtos e a IA entra em contato com todos eles, recebe as propostas e te apresenta o melhor preço para você fechar negócio',
+        '1. Sim — confirmar cadastro',
+        '2. Não — corrigir informações',
       ].filter(l => l !== '').join('\n'))
 
-      await sendText(telefone, [
-        'Agora vamos cadastrar seus fornecedores.',
-        '',
-        'Envie o *número de WhatsApp* de cada fornecedor (um por mensagem).',
-        'Quando terminar, envie *pronto*.',
-        '',
-        'Ex: _11999990001_',
-      ].join('\n'))
+      // Aguarda confirmação antes de prosseguir
+      await supabase.from('onboarding_sessoes')
+        .update({ etapa: 'aguardando_confirmacao_cadastro', atualizado_em: new Date().toISOString() })
+        .eq('telefone', telefone)
 
+      return { ok: true }
+    }
+    case 'aguardando_confirmacao_cadastro': {
+      const cmd = texto.toLowerCase()
+      if (cmd === '1' || cmd === 'sim' || cmd === 's') {
+        await supabase.from('onboarding_sessoes')
+          .update({ etapa: 'cadastrando_fornecedores', atualizado_em: new Date().toISOString() })
+          .eq('telefone', telefone)
+
+        await sendText(telefone, [
+          'Cadastro confirmado!',
+          '',
+          'Agora você tem um agente de IA cuidando das suas compras.',
+          '',
+          '*Como funciona:*',
+          '• Cadastre seus fornecedores aqui no Kota',
+          '• Envie sua lista de produtos e a IA entra em contato com todos eles, recebe as propostas e te apresenta o melhor preço para você fechar negócio',
+        ].join('\n'))
+
+        await sendText(telefone, [
+          'Agora vamos cadastrar seus fornecedores.',
+          '',
+          'Envie o *número de WhatsApp* de cada fornecedor (um por mensagem).',
+          'Quando terminar, envie *pronto*.',
+          '',
+          'Ex: _11999990001_',
+        ].join('\n'))
+        return { ok: true }
+      }
+
+      if (cmd === '2' || cmd === 'não' || cmd === 'nao' || cmd === 'n') {
+        // Reinicia o cadastro do comerciante
+        await supabase.from('onboarding_sessoes')
+          .update({ etapa: 'aguardando_nome', nome: null, empresa: null, cnpj: null,
+                    atualizado_em: new Date().toISOString() })
+          .eq('telefone', telefone)
+        await sendText(telefone, 'Tudo bem! Vamos recomeçar.\n\nQual é o seu nome?')
+        return { ok: true }
+      }
+
+      await sendText(telefone, 'Responda com *1* para confirmar ou *2* para corrigir.')
       return { ok: true }
     }
     case 'cadastrando_fornecedores': {
