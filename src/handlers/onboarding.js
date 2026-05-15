@@ -1,5 +1,5 @@
 import { supabase } from '../db/client.js'
-import { sendText, sendDocument } from '../services/whatsapp.js'
+import { sendText, sendDocument, sendTemplate } from '../services/whatsapp.js'
 import { criarVinculo } from '../db/vinculos.js'
 import { findRepresentanteByTelefone } from '../db/client.js'
 
@@ -39,8 +39,8 @@ export async function handleAutocadastro(telefone, message) {
     if (texto === 'cadastro' || texto === 'cadastrar') {
       return iniciarOnboardingRep(telefone)
     }
-    // Resposta ao convite do comerciante
-    if (texto === 'sim' || texto === 'ok' || texto === 'quero') {
+    // Resposta ao convite do comerciante (texto "sim" ou botão "Confirmar" do template)
+    if (texto === 'sim' || texto === 'ok' || texto === 'quero' || texto === 'confirmar') {
       return iniciarOnboardingRep(telefone)
     }
     return iniciarSeleçãoPerfil(telefone)
@@ -538,6 +538,7 @@ export async function handleConvidarFornecedor(telefoneComerciant, telefoneForne
       'Você receberá as cotações desse cliente automaticamente.',
     ].join('\n'))
   } else {
+    // Novo fornecedor — usa template aprovado (alcança números que nunca interagiram com o Kota)
     await supabase.from('convites_pendentes').upsert({
       comerciante_id:      comerciante.id,
       telefone_fornecedor: telefoneFornecedor,
@@ -545,25 +546,22 @@ export async function handleConvidarFornecedor(telefoneComerciant, telefoneForne
       criado_em:           new Date().toISOString(),
     }, { onConflict: 'comerciante_id,telefone_fornecedor', ignoreDuplicates: true })
 
-    await sendText(telefoneFornecedor, [
-      `*${comerciante.nome ?? 'Um comerciante'}* (${comerciante.empresa ?? ''}) convidou você para o *Kota*.`,
-      '',
-      'O Kota é um agente de cotação com IA — seus clientes enviam listas de produtos e você recebe as cotações automaticamente, direto pelo WhatsApp.',
-      '',
-      'Para começar seu cadastro como representante, responda *sim*.',
-    ].join('\n'))
+    const nomeComerciant = comerciante.empresa ?? comerciante.nome ?? 'Um comerciante'
+    const templateResult = await sendTemplate(telefoneFornecedor, 'convite_fornecedor', [nomeComerciant])
+
+    if (!templateResult.ok) {
+      console.warn(`[convite] falha ao enviar template para ${telefoneFornecedor}:`, templateResult.error)
+    }
 
     if (!silencioso) {
       await sendText(telefoneComerciant, [
         `Convite enviado para *${telefoneFornecedor}*.`,
-        'Quando o fornecedor concluir o cadastro, o vínculo é criado automaticamente.',
+        'Quando o fornecedor confirmar, o vínculo é criado automaticamente.',
         '',
-        'Pode enviar mais números ou enviar sua lista de produtos quando quiser.',
+        'Pode enviar mais números ou sua lista de produtos quando quiser.',
       ].join('\n'))
     } else {
-      await sendText(telefoneComerciant,
-        `Convite enviado para *${telefoneFornecedor}*.`
-      )
+      await sendText(telefoneComerciant, `Convite enviado para *${telefoneFornecedor}*.`)
     }
   }
 
