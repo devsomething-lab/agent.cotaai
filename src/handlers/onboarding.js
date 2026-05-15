@@ -402,10 +402,12 @@ async function processarEtapaComerciantge(telefone, sessao, message) {
         await sendText(telefone, [
           'Agora vamos cadastrar seus fornecedores.',
           '',
-          'Envie o *número de WhatsApp* de cada fornecedor (um por mensagem).',
-          'Quando terminar, envie *pronto*.',
+          'Envie os números de WhatsApp — pode enviar vários de uma vez, um por linha.',
+          'Quando quiser parar, é só enviar sua lista de produtos.',
           '',
-          'Ex: _11999990001_',
+          'Ex:',
+          '_47999990001_',
+          '_11988880002_',
         ].join('\n'))
         return { ok: true }
       }
@@ -424,53 +426,30 @@ async function processarEtapaComerciantge(telefone, sessao, message) {
       return { ok: true }
     }
     case 'cadastrando_fornecedores': {
-      if (['pronto', 'ok', 'finalizar', 'fim', 'encerrar'].includes(texto.toLowerCase())) {
-        await supabase.from('onboarding_sessoes')
-          .update({ etapa: 'concluido', atualizado_em: new Date().toISOString() })
-          .eq('telefone', telefone)
-        await sendText(telefone, [
-          'Perfeito! Seus fornecedores foram cadastrados.',
-          '',
-          'Quando eles concluírem o cadastro no Kota, o vínculo é criado automaticamente e você já pode cotá-los.',
-          '',
-          'Pode enviar sua lista de produtos quando precisar.',
-        ].join('\n'))
-        return { ok: true }
-      }
-
-      // Extrai todos os telefones da mensagem (aceita lista ou número único)
+      // Tenta extrair telefones da mensagem
       const telefonesEncontrados = extrairTelefones(texto)
-      if (!telefonesEncontrados.length) {
-        await sendText(telefone, [
-          'Número inválido. Envie o WhatsApp do fornecedor (só números):',
-          '_11999990001_',
-          '',
-          'Para cadastrar vários de uma vez, envie um por linha:',
-          '_11999990001_',
-          '_47999990002_',
-          '_21999990003_',
-          '',
-          'Quando terminar, envie *pronto*.',
-        ].join('\n'))
+
+      if (telefonesEncontrados.length) {
+        // É um número (ou lista de números) — processa
+        const emLote = telefonesEncontrados.length > 1
+        if (emLote) {
+          await sendText(telefone, `Processando ${telefonesEncontrados.length} contato(s)...`)
+        }
+        for (const tel of telefonesEncontrados) {
+          await handleConvidarFornecedor(telefone, tel, { silencioso: emLote })
+        }
+        if (emLote) {
+          await sendText(telefone, `${telefonesEncontrados.length} contato(s) adicionado(s). Pode enviar mais ou enviar sua lista de produtos quando quiser.`)
+        }
         return { ok: true }
       }
 
-      // Processa cada número — silencioso se for lote, normal se for único
-      const emLote = telefonesEncontrados.length > 1
-      if (emLote) {
-        await sendText(telefone, `Processando ${telefonesEncontrados.length} contato(s)...`)
-      }
-      for (const tel of telefonesEncontrados) {
-        await handleConvidarFornecedor(telefone, tel, { silencioso: emLote })
-      }
-      if (emLote) {
-        await sendText(telefone, [
-          `${telefonesEncontrados.length} contato(s) processado(s).`,
-          '',
-          'Envie mais números ou *pronto* para encerrar.',
-        ].join('\n'))
-      }
-      return { ok: true }
+      // Não é um número — encerra o estado e devolve null para
+      // o webhook processar a mensagem normalmente (ex: lista de produtos)
+      await supabase.from('onboarding_sessoes')
+        .update({ etapa: 'concluido', atualizado_em: new Date().toISOString() })
+        .eq('telefone', telefone)
+      return null
     }
     default: return null
   }
@@ -478,23 +457,29 @@ async function processarEtapaComerciantge(telefone, sessao, message) {
 
 // ── Helper: extrai múltiplos telefones de uma mensagem ────────────────
 // Aceita: um por linha, separados por vírgula, espaço ou quebra de linha
+// Sempre retorna com código do país 55 (formato Meta API)
 
 function extrairTelefones(texto) {
-  // Separa por quebra de linha, vírgula ou ponto e vírgula
   const partes = texto.split(/[\n,;]+/)
   const telefones = []
   for (const parte of partes) {
     const digits = parte.replace(/\D/g, '')
-    // Telefone brasileiro: 10-11 dígitos (com DDD) ou 12-13 com código do país
-    if (digits.length >= 10 && digits.length <= 13) {
-      // Normaliza: remove código do país 55 se presente
-      const tel = digits.startsWith('55') && digits.length > 11
-        ? digits.slice(2)
-        : digits
-      if (tel.length >= 10) telefones.push(tel)
+    if (digits.length < 10) continue
+
+    // Normaliza para formato Meta API: sempre com código do país 55
+    let tel = digits
+    if (tel.startsWith('55') && tel.length >= 12) {
+      // já tem o código — mantém
+    } else if (tel.length >= 10 && tel.length <= 11) {
+      // número brasileiro sem código — adiciona 55
+      tel = '55' + tel
+    } else {
+      continue // formato não reconhecido
     }
+
+    telefones.push(tel)
   }
-  return [...new Set(telefones)] // remove duplicatas
+  return [...new Set(telefones)]
 }
 
 // ── Helpers de CNPJ ───────────────────────────────────────────────────
@@ -541,7 +526,7 @@ export async function handleConvidarFornecedor(telefoneComerciant, telefoneForne
         `*${rep.nome}* (${rep.empresa ?? ''}) já está no Kota e foi vinculado como seu fornecedor.`,
         'Ele receberá suas cotações automaticamente.',
         '',
-        'Envie o próximo número ou *pronto* para encerrar.',
+        'Pode enviar mais números ou enviar sua lista de produtos quando quiser.',
       ].join('\n'))
     } else {
       await sendText(telefoneComerciant,
@@ -573,7 +558,7 @@ export async function handleConvidarFornecedor(telefoneComerciant, telefoneForne
         `Convite enviado para *${telefoneFornecedor}*.`,
         'Quando o fornecedor concluir o cadastro, o vínculo é criado automaticamente.',
         '',
-        'Envie o próximo número ou *pronto* para encerrar.',
+        'Pode enviar mais números ou enviar sua lista de produtos quando quiser.',
       ].join('\n'))
     } else {
       await sendText(telefoneComerciant,

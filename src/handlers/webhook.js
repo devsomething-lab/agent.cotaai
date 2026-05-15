@@ -9,7 +9,7 @@ import { upsertCatalogoEmLote, salvarPromocao } from '../db/catalogo.js'
 import { sendText, sendTextOrTemplate, downloadMedia, normalizeMetaPayload,
          templateCotacaoParaRep, templateComparativo, templatePedidoConfirmado } from '../services/whatsapp.js'
 import * as XLSX from 'xlsx'
-import { handleAutocadastro, getSessaoOnboarding, handleOnboardingComerciantge, getSessaoOnboardingComerciantge } from './onboarding.js'
+import { handleAutocadastro, getSessaoOnboarding, handleOnboardingComerciantge, getSessaoOnboardingComerciantge, handleConvidarFornecedor } from './onboarding.js'
 import { criarVinculo, removerVinculo, getRepresentantesVinculados, getComerciantesVinculados,
          findRepByCodigoConvite, gerarCodigoConvite } from '../db/vinculos.js'
 import 'dotenv/config'
@@ -30,6 +30,24 @@ function getEstadoVinculo(phone) {
   return estado
 }
 function clearEstadoVinculo(phone) { _estadosVinculo.delete(phone) }
+
+// ── Helper: extrai telefones de texto livre no webhook ────────────────
+// Mesmo algoritmo do onboarding — sempre com código 55
+
+function extrairTelefonesWebhook(texto) {
+  const partes = texto.split(/[\n,;]+/)
+  const tels = []
+  for (const parte of partes) {
+    const digits = parte.replace(/\D/g, '')
+    if (digits.length < 10) continue
+    let tel = digits
+    if (tel.startsWith('55') && tel.length >= 12) { /* ok */ }
+    else if (tel.length >= 10 && tel.length <= 11) tel = '55' + tel
+    else continue
+    tels.push(tel)
+  }
+  return [...new Set(tels)]
+}
 
 // ── Deduplicação de webhooks ──────────────────────────────────────────
 // Meta Cloud API pode entregar o mesmo webhook 2x em rápida sucessão.
@@ -174,8 +192,24 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
   // ── Estado transiente: aguardando telefone do fornecedor ─────────────
   const estadoAtual = getEstadoVinculo(phone)
   if (estadoAtual?.acao === 'aguardando_telefone_fornecedor' && type === 'texto') {
+    if (cmd === 'cancelar') {
+      clearEstadoVinculo(phone)
+      await sendText(phone, 'Ok, cancelado.')
+      return { ok: true }
+    }
+    const tels = extrairTelefonesWebhook(message.trim())
+    if (!tels.length) {
+      await sendText(phone, 'Número inválido. Envie o WhatsApp do fornecedor.\n\nEx: _47999990001_')
+      return { ok: true }
+    }
     clearEstadoVinculo(phone)
-    return handleVincularRepPorTelefone(comerciante, phone, message.trim())
+    const emLote = tels.length > 1
+    if (emLote) await sendText(phone, `Processando ${tels.length} contato(s)...`)
+    for (const tel of tels) {
+      await handleConvidarFornecedor(phone, tel, { silencioso: emLote })
+    }
+    if (emLote) await sendText(phone, `${tels.length} fornecedor(es) adicionado(s).`)
+    return { ok: true }
   }
 
   // ── Comandos naturais ──────────────────────────────────────────────
@@ -199,19 +233,35 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
     return handleListarFornecedores(comerciante, phone)
   }
 
-  // Iniciar fluxo de adicionar fornecedor
+  // Adicionar fornecedor por número direto: "adicionar fornecedor 47999990001"
+  const matchAddFornecedor = cmd.match(/^(?:adicionar|novo|add)\s+fornecedor\s+([\d\s]+)$/)
+  if (matchAddFornecedor) {
+    const tels = extrairTelefonesWebhook(matchAddFornecedor[1])
+    if (tels.length) {
+      for (const tel of tels) {
+        await handleConvidarFornecedor(phone, tel)
+      }
+      return { ok: true }
+    }
+  }
+
+  // Iniciar fluxo de adicionar fornecedor (sem número na mensagem)
   if (cmd === 'adicionar fornecedor' || cmd === 'novo fornecedor' || cmd === 'add fornecedor') {
     setEstadoVinculo(phone, 'aguardando_telefone_fornecedor')
     await sendText(phone, [
-      'Qual o telefone ou código do fornecedor?',
+      'Envie o número de WhatsApp do fornecedor.',
       '',
-      '• Telefone: _11999990001_',
-      '• Código de convite: _ABC123_',
+      'Pode enviar vários de uma vez, um por linha.',
       '',
-      'Envie *cancelar* para desistir.',
+      'Ex:',
+      '_47999990001_',
+      '_11988880002_',
     ].join('\n'))
     return { ok: true }
   }
+
+  // Estado: aguardando número após "adicionar fornecedor"
+  // (já tratado no topo pelo getEstadoVinculo)
 
   if (cmd === 'minha cotacao' || cmd === 'minha cotação' || cmd === 'cotacao' || cmd === 'cotação') {
     return handleVerCotacaoAtual(comerciante, phone)
