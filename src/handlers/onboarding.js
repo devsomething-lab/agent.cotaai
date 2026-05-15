@@ -153,7 +153,7 @@ async function processarEtapaRep(telefone, sessao, message) {
       await supabase.from('onboarding_sessoes')
         .update({ cnpj: cnpjFinal, etapa: 'aguardando_prazo_entrega', atualizado_em: new Date().toISOString() })
         .eq('telefone', telefone)
-      await sendText(telefone, `Qual é o seu prazo de entrega padrão (em dias)?\n\nEx: _2_ para 2 dias úteis`)
+      await sendText(telefone, `Qual é o seu prazo médio de entrega (em dias)?\n\nEx: _2_ para 2 dias úteis`)
       return { ok: true }
     }
     case 'aguardando_prazo_entrega': {
@@ -165,7 +165,7 @@ async function processarEtapaRep(telefone, sessao, message) {
       await supabase.from('onboarding_sessoes')
         .update({ prazo_entrega_dias: dias, etapa: 'aguardando_prazo_pagamento', atualizado_em: new Date().toISOString() })
         .eq('telefone', telefone)
-      await sendText(telefone, `Entendido, ${dias} dia(s). E o prazo de pagamento padrão (em dias)?\n\nEx: _30_ para 30 dias, _0_ para à vista`)
+      await sendText(telefone, `Entendido, ${dias} dia(s). E o prazo médio de pagamento (em dias)?\n\nEx: _30_ para 30 dias, _0_ para à vista`)
       return { ok: true }
     }
     case 'aguardando_prazo_pagamento': {
@@ -188,9 +188,12 @@ async function processarEtapaRep(telefone, sessao, message) {
       await sendText(telefone, [
         `*Cadastro concluído! Bem-vindo ao Kota, ${s.nome}.*`,
         '',
-        `*${s.empresa}*`,
-        s.cnpj ? `CNPJ: ${formatarCNPJ(s.cnpj)}` : '',
-        `Entrega: ${s.prazo_entrega_dias} dia(s) · Pagamento: ${diasPg === 0 ? 'à vista' : `${diasPg} dias`}`,
+        '*Resumo do seu cadastro:*',
+        `• Nome: ${s.nome}`,
+        `• Empresa: ${s.empresa}`,
+        s.cnpj ? `• CNPJ: ${formatarCNPJ(s.cnpj)}` : '',
+        `• Prazo médio de entrega: ${s.prazo_entrega_dias} dia(s)`,
+        `• Prazo médio de pagamento: ${diasPg === 0 ? 'à vista' : `${diasPg} dias`}`,
         '',
         'A partir de agora você receberá pedidos de cotação aqui no WhatsApp.',
         '',
@@ -204,7 +207,7 @@ async function processarEtapaRep(telefone, sessao, message) {
         '- Arquivo PDF',
         '- Lista em texto (ex: _Coca-Cola 2L R$ 8,50_)',
         '- Foto da tabela impressa',
-      ].join('\n'))
+      ].filter(l => l !== '').join('\n'))
 
       if (TEMPLATE_CATALOGO_URL) {
         await sendDocument(
@@ -311,8 +314,10 @@ async function processarEtapaComerciantge(telefone, sessao, message) {
       await sendText(telefone, [
         `*Tudo pronto! Bem-vindo ao Kota, ${s2.nome}.*`,
         '',
-        `*${s2.empresa}*`,
-        cnpjFinal ? `CNPJ: ${formatarCNPJ(cnpjFinal)}` : '',
+        '*Resumo do seu cadastro:*',
+        `• Nome: ${s2.nome}`,
+        `• Estabelecimento: ${s2.empresa}`,
+        cnpjFinal ? `• CNPJ: ${formatarCNPJ(cnpjFinal)}` : '',
         '',
         'Agora você tem um agente de IA cuidando das suas compras.',
         '',

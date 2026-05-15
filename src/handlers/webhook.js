@@ -243,6 +243,44 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
     return handleHistorico(comerciante, phone)
   }
 
+  // ── Cotação aguardando confirmação da lista ───────────────────────
+  const { data: cotacaoConfirmando } = await supabase
+    .from('cotacoes')
+    .select('*, cotacao_itens(*)')
+    .eq('comerciante_id', comerciante.id)
+    .eq('status', 'aguardando_respostas')
+    .eq('obs_interna', 'aguardando_confirmacao_lista')
+    .order('criado_em', { ascending: false })
+    .limit(1)
+    .single()
+
+  if (cotacaoConfirmando && message) {
+    if (cmd === '1' || cmd === 'sim' || cmd === 'seguir' || cmd === 'confirmar') {
+      // Confirma — dispara cotação
+      await supabase.from('cotacoes')
+        .update({ obs_interna: null })
+        .eq('id', cotacaoConfirmando.id)
+      await sendText(phone, 'Verificando catálogos dos representantes...')
+      await dispararCotacao(cotacaoConfirmando, comerciante)
+      return { ok: true }
+    }
+    if (cmd === '2' || cmd === 'cancelar' || cmd === 'nova lista' || cmd === 'ajustar') {
+      // Cancela cotação e pede nova lista
+      await supabase.from('cotacoes')
+        .update({ status: 'cancelada', obs_interna: null, fechado_em: new Date().toISOString() })
+        .eq('id', cotacaoConfirmando.id)
+      await sendText(phone, 'Tudo bem! Pode me enviar a lista corrigida quando quiser.')
+      return { ok: true }
+    }
+    // Resposta não reconhecida — repete a pergunta
+    await sendText(phone, [
+      'Responda com:',
+      '1. Seguir com essa lista',
+      '2. Cancelar e enviar uma nova lista',
+    ].join('\n'))
+    return { ok: true }
+  }
+
   // ── Cotação aguardando escolha (modo compra) ──────────────────────
   const { data: cotacaoAguardandoEscolha } = await supabase
     .from('cotacoes')
@@ -470,12 +508,15 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
     await sendText(phone, blocosMensagem[i])
   }
 
-  // Envia último bloco com rodapé
+  // Envia última mensagem com rodapé de confirmação
   const rodape = [
     temSugestoes ? '_Quantidades com (sugestão) são baseadas no seu histórico._' : '',
     '',
-    'Verificando catálogos dos representantes...',
-  ].filter(Boolean).join('\n')
+    'Essa é a sua lista. Deseja seguir com essa cotação ou prefere ajustar algo?',
+    '',
+    '1. Seguir com essa lista',
+    '2. Cancelar e enviar uma nova lista',
+  ].filter(l => l !== '').join('\n')
 
   const ultimoBloco = blocosMensagem.length > 1 ? blocosMensagem[blocosMensagem.length - 1] : ''
   if (ultimoBloco) {
@@ -484,9 +525,12 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
     await sendText(phone, rodape)
   }
 
-  // ── Tenta cotação automática ──────────────────────────────────────
-  const { repsAutomaticos, repsManuais, itensSemCobertura, modo } =
-    await resolverCotacaoAutomatica(cotacao.id, itens, comerciante.id)
+  // Salva cotação em estado aguardando confirmação antes de disparar
+  await supabase.from('cotacoes')
+    .update({ obs_interna: 'aguardando_confirmacao_lista' })
+    .eq('id', cotacao.id)
+
+  return { ok: true }
 
   // Salva propostas automáticas
   for (const { rep, propostas } of repsAutomaticos) {
@@ -1225,6 +1269,34 @@ async function handleListarClientes(rep) {
     'Para adicionar novo: _adicionar cliente_',
   ].join('\n'))
   return { ok: true }
+}
+
+// ── Disparar cotação após confirmação da lista ────────────────────────
+
+async function dispararCotacao(cotacao, comerciante) {
+  const itens = cotacao.cotacao_itens ?? []
+  const phone = comerciante.telefone
+
+  const { repsAutomaticos, repsManuais, itensSemCobertura, modo } =
+    await resolverCotacaoAutomatica(cotacao.id, itens, comerciante.id)
+
+  for (const { rep, propostas } of repsAutomaticos) {
+    await salvarPropostasAutomaticas(cotacao.id, rep.id, propostas)
+  }
+
+  if (modo === 'automatico') {
+    await sendText(phone, 'Todos os fornecedores têm catálogo atualizado. Comparativo pronto em segundos!')
+    await consolidarEEnviar(cotacao.id)
+  } else {
+    const msgs = ['Consultando fornecedores:']
+    if (repsAutomaticos.length) msgs.push(`${repsAutomaticos.length} fornecedor(es) com catálogo responderam automaticamente`)
+    if (repsManuais.length) {
+      msgs.push(`${repsManuais.length} fornecedor(es) sem catálogo serão consultados via WhatsApp`)
+      await dispararParaRepsManuais(cotacao, itens, repsManuais)
+    }
+    if (itensSemCobertura.length) msgs.push(`${itensSemCobertura.length} item(ns) sem fornecedor no catálogo`)
+    await sendText(phone, msgs.join('\n'))
+  }
 }
 
 async function handleCancelarParaNovaCotacao(comerciante, cotacao, phone) {
