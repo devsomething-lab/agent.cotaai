@@ -573,8 +573,21 @@ export async function handleConvidarFornecedor(telefoneComerciant, telefoneForne
     const nomeComerciant = comerciante.empresa ?? comerciante.nome ?? 'Um comerciante'
     const templateResult = await sendTemplate(telefoneFornecedor, 'convite_fornecedor', [nomeComerciant])
 
+    console.log(`[convite] template para ${telefoneFornecedor}:`, JSON.stringify(templateResult))
+
     if (!templateResult.ok) {
-      console.warn(`[convite] falha ao enviar template para ${telefoneFornecedor}:`, templateResult.error)
+      const motivo = templateResult.error?.error?.message ?? JSON.stringify(templateResult.error)
+      console.error(`[convite] falha no template para ${telefoneFornecedor}: ${motivo}`)
+
+      if (!silencioso) {
+        await sendText(telefoneComerciant, [
+          `Não foi possível enviar o convite para *${telefoneFornecedor}*.`,
+          `Motivo: ${motivo}`,
+          '',
+          'Verifique se o número está correto e tente novamente.',
+        ].join('\n'))
+      }
+      return { ok: false }
     }
 
     if (!silencioso) {
