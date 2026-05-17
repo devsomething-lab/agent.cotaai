@@ -108,11 +108,13 @@ export async function handleWebhook(payload) {
     return handleAutocadastro(phone, message)
   }
 
-  // 2. Verifica se é keyword de cadastro
+  // 2. Verifica se é keyword de cadastro ou resposta ao convite
   const msgLower = (message ?? '').trim().toLowerCase()
-  if (msgLower === 'cadastro' || msgLower === 'cadastrar') {
+  if (msgLower === 'cadastro' || msgLower === 'cadastrar' ||
+      msgLower === 'sim' || msgLower === 'confirmar') {
     const rep = await findRepresentanteByTelefone(phone)
-    if (!rep) {
+    const { data: com } = await supabase.from('comerciantes').select('empresa').eq('telefone', phone).single()
+    if (!rep && !com?.empresa) {
       return handleAutocadastro(phone, message)
     }
   }
@@ -140,10 +142,7 @@ export async function handleWebhook(payload) {
     return handleMensagemComerciantge({ phone, message, type, mediaId, mimeType })
   }
 
-  // 6. Número desconhecido — inicia seleção de perfil
-  if (!comercianteExistente) {
-    await supabase.from('comerciantes').insert({ telefone: phone, nome: phone })
-  }
+  // 6. Número desconhecido — inicia seleção de perfil sem criar comerciante prematuramente
   return handleAutocadastro(phone, message)
 }
 
