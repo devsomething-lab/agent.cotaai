@@ -307,6 +307,10 @@ async function processarEtapaRep(telefone, sessao, message) {
 // ══════════════════════════════════════════════════════════════
 
 async function iniciarOnboardingComerciantge(telefone) {
+  // Garante que existe um registro na tabela comerciantes
+  await supabase.from('comerciantes')
+    .upsert({ telefone, nome: telefone }, { onConflict: 'telefone', ignoreDuplicates: true })
+
   await supabase.from('onboarding_sessoes').upsert({
     telefone,
     tipo: 'comerciante',
