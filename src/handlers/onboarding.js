@@ -573,23 +573,22 @@ export async function handleConvidarFornecedor(telefoneComerciant, telefoneForne
     const nomeComerciant = comerciante.empresa ?? comerciante.nome ?? 'Um comerciante'
     const templateResult = await sendTemplate(telefoneFornecedor, 'convite_fornecedor', [nomeComerciant])
 
-    console.log(`[convite] template para ${telefoneFornecedor}:`, JSON.stringify(templateResult))
+    console.log(`[convite] template ${telefoneFornecedor} → ok:${templateResult.ok}`, JSON.stringify(templateResult).slice(0, 300))
 
     if (!templateResult.ok) {
       const motivo = templateResult.error?.error?.message ?? JSON.stringify(templateResult.error)
       console.error(`[convite] falha no template para ${telefoneFornecedor}: ${motivo}`)
-
-      if (!silencioso) {
-        await sendText(telefoneComerciant, [
-          `Não foi possível enviar o convite para *${telefoneFornecedor}*.`,
-          `Motivo: ${motivo}`,
-          '',
-          'Verifique se o número está correto e tente novamente.',
-        ].join('\n'))
-      }
+      // Sempre avisa o comerciante sobre falha, independente do modo silencioso
+      await sendText(telefoneComerciant, [
+        `Não foi possível enviar o convite para *${telefoneFornecedor}*.`,
+        `Erro: ${motivo}`,
+        '',
+        'Verifique se o número está correto.',
+      ].join('\n'))
       return { ok: false }
     }
 
+    // Sucesso — avisa o comerciante apenas no modo individual
     if (!silencioso) {
       await sendText(telefoneComerciant, [
         `Convite enviado para *${telefoneFornecedor}*.`,
@@ -597,8 +596,6 @@ export async function handleConvidarFornecedor(telefoneComerciant, telefoneForne
         '',
         'Pode enviar mais números ou sua lista de produtos quando quiser.',
       ].join('\n'))
-    } else {
-      await sendText(telefoneComerciant, `Convite enviado para *${telefoneFornecedor}*.`)
     }
   }
 
