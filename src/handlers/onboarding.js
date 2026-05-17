@@ -426,26 +426,43 @@ async function processarEtapaComerciantge(telefone, sessao, message) {
       return { ok: true }
     }
     case 'cadastrando_fornecedores': {
-      // Tenta extrair telefones da mensagem
-      const telefonesEncontrados = extrairTelefones(texto)
+      const { validos, invalidos } = extrairTelefones(texto)
 
-      if (telefonesEncontrados.length) {
-        // É um número (ou lista de números) — processa
-        const emLote = telefonesEncontrados.length > 1
-        if (emLote) {
-          await sendText(telefone, `Processando ${telefonesEncontrados.length} contato(s)...`)
-        }
-        for (const tel of telefonesEncontrados) {
-          await handleConvidarFornecedor(telefone, tel, { silencioso: emLote })
-        }
-        if (emLote) {
-          await sendText(telefone, `${telefonesEncontrados.length} contato(s) adicionado(s). Pode enviar mais ou enviar sua lista de produtos quando quiser.`)
-        }
+      // Tem números inválidos (sem DDD) — avisa e não processa
+      if (invalidos.length > 0 && validos.length === 0) {
+        await sendText(telefone, [
+          'Número(s) incompleto(s) — parece que está faltando o DDD.',
+          '',
+          ...invalidos.map(n => `• ${n} ← faltando DDD`),
+          '',
+          'Envie com DDD + número. Ex:',
+          '_47 99272878_',
+          '_47 991267785_',
+        ].join('\n'))
         return { ok: true }
       }
 
-      // Não é um número — encerra o estado e devolve null para
-      // o webhook processar a mensagem normalmente (ex: lista de produtos)
+      // Tem mistura de válidos e inválidos — processa os válidos e avisa sobre os inválidos
+      if (invalidos.length > 0 && validos.length > 0) {
+        await sendText(telefone, [
+          'Alguns números estão incompletos (sem DDD):',
+          ...invalidos.map(n => `• ${n} ← faltando DDD`),
+          '',
+          'Esses foram ignorados. Reenvie com DDD quando quiser.',
+        ].join('\n'))
+      }
+
+      if (validos.length) {
+        const emLote = validos.length > 1
+        if (emLote) await sendText(telefone, `Processando ${validos.length} contato(s)...`)
+        for (const tel of validos) {
+          await handleConvidarFornecedor(telefone, tel, { silencioso: emLote })
+        }
+        if (emLote) await sendText(telefone, `${validos.length} contato(s) adicionado(s). Pode enviar mais ou sua lista de produtos quando quiser.`)
+        return { ok: true }
+      }
+
+      // Não é número — encerra o estado e devolve null para o webhook processar normalmente
       await supabase.from('onboarding_sessoes')
         .update({ etapa: 'concluido', atualizado_em: new Date().toISOString() })
         .eq('telefone', telefone)
@@ -456,30 +473,37 @@ async function processarEtapaComerciantge(telefone, sessao, message) {
 }
 
 // ── Helper: extrai múltiplos telefones de uma mensagem ────────────────
-// Aceita: um por linha, separados por vírgula, espaço ou quebra de linha
-// Sempre retorna com código do país 55 (formato Meta API)
+// Retorna { validos: [...], invalidos: [...] }
+// Sempre com código do país 55 (formato Meta API)
 
 function extrairTelefones(texto) {
   const partes = texto.split(/[\n,;]+/)
-  const telefones = []
-  for (const parte of partes) {
-    const digits = parte.replace(/\D/g, '')
-    if (digits.length < 10) continue
+  const validos = []
+  const invalidos = []
 
-    // Normaliza para formato Meta API: sempre com código do país 55
-    let tel = digits
-    if (tel.startsWith('55') && tel.length >= 12) {
-      // já tem o código — mantém
-    } else if (tel.length >= 10 && tel.length <= 11) {
-      // número brasileiro sem código — adiciona 55
-      tel = '55' + tel
-    } else {
-      continue // formato não reconhecido
+  for (const parte of partes) {
+    const raw = parte.trim()
+    if (!raw) continue
+    const digits = raw.replace(/\D/g, '')
+    if (!digits) continue
+
+    if (digits.length >= 7 && digits.length <= 9) {
+      // Parece um telefone mas sem DDD
+      invalidos.push(raw)
+      continue
     }
 
-    telefones.push(tel)
+    if (digits.length < 10) continue // muito curto para ser telefone
+
+    let tel = digits
+    if (tel.startsWith('55') && tel.length >= 12) { /* ok */ }
+    else if (tel.length >= 10 && tel.length <= 11) tel = '55' + tel
+    else continue
+
+    validos.push(tel)
   }
-  return [...new Set(telefones)]
+
+  return { validos: [...new Set(validos)], invalidos }
 }
 
 // ── Helpers de CNPJ ───────────────────────────────────────────────────

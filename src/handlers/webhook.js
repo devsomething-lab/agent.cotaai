@@ -36,17 +36,19 @@ function clearEstadoVinculo(phone) { _estadosVinculo.delete(phone) }
 
 function extrairTelefonesWebhook(texto) {
   const partes = texto.split(/[\n,;]+/)
-  const tels = []
+  const validos = [], invalidos = []
   for (const parte of partes) {
-    const digits = parte.replace(/\D/g, '')
+    const digits = parte.trim().replace(/\D/g, '')
+    if (!digits) continue
+    if (digits.length >= 7 && digits.length <= 9) { invalidos.push(parte.trim()); continue }
     if (digits.length < 10) continue
     let tel = digits
     if (tel.startsWith('55') && tel.length >= 12) { /* ok */ }
     else if (tel.length >= 10 && tel.length <= 11) tel = '55' + tel
     else continue
-    tels.push(tel)
+    validos.push(tel)
   }
-  return [...new Set(tels)]
+  return { validos: [...new Set(validos)], invalidos }
 }
 
 // ── Deduplicação de webhooks ──────────────────────────────────────────
@@ -197,18 +199,28 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
       await sendText(phone, 'Ok, cancelado.')
       return { ok: true }
     }
-    const tels = extrairTelefonesWebhook(message.trim())
-    if (!tels.length) {
+    const { validos, invalidos } = extrairTelefonesWebhook(message.trim())
+    if (invalidos.length > 0 && validos.length === 0) {
+      await sendText(phone, [
+        'Número(s) incompleto(s) — parece que está faltando o DDD.',
+        '',
+        ...invalidos.map(n => `• ${n} ← faltando DDD`),
+        '',
+        'Envie com DDD + número. Ex: _47 99272878_',
+      ].join('\n'))
+      return { ok: true }
+    }
+    if (!validos.length) {
       await sendText(phone, 'Número inválido. Envie o WhatsApp do fornecedor.\n\nEx: _47999990001_')
       return { ok: true }
     }
     clearEstadoVinculo(phone)
-    const emLote = tels.length > 1
-    if (emLote) await sendText(phone, `Processando ${tels.length} contato(s)...`)
-    for (const tel of tels) {
+    const emLote = validos.length > 1
+    if (emLote) await sendText(phone, `Processando ${validos.length} contato(s)...`)
+    for (const tel of validos) {
       await handleConvidarFornecedor(phone, tel, { silencioso: emLote })
     }
-    if (emLote) await sendText(phone, `${tels.length} fornecedor(es) adicionado(s).`)
+    if (emLote) await sendText(phone, `${validos.length} fornecedor(es) adicionado(s).`)
     return { ok: true }
   }
 
@@ -236,11 +248,9 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
   // Adicionar fornecedor por número direto: "adicionar fornecedor 47999990001"
   const matchAddFornecedor = cmd.match(/^(?:adicionar|novo|add)\s+fornecedor\s+([\d\s]+)$/)
   if (matchAddFornecedor) {
-    const tels = extrairTelefonesWebhook(matchAddFornecedor[1])
-    if (tels.length) {
-      for (const tel of tels) {
-        await handleConvidarFornecedor(phone, tel)
-      }
+    const { validos } = extrairTelefonesWebhook(matchAddFornecedor[1])
+    if (validos.length) {
+      for (const tel of validos) await handleConvidarFornecedor(phone, tel)
       return { ok: true }
     }
   }
