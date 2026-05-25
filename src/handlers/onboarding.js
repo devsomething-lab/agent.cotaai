@@ -437,7 +437,6 @@ async function processarEtapaComerciantge(telefone, sessao, message) {
     case 'cadastrando_fornecedores': {
       const { validos, invalidos } = extrairTelefones(texto)
 
-      // Tem números inválidos (sem DDD) — avisa e não processa
       if (invalidos.length > 0 && validos.length === 0) {
         await sendText(telefone, [
           'Número(s) incompleto(s) — parece que está faltando o DDD.',
@@ -451,27 +450,49 @@ async function processarEtapaComerciantge(telefone, sessao, message) {
         return { ok: true }
       }
 
-      // Tem mistura de válidos e inválidos — processa os válidos e avisa sobre os inválidos
-      if (invalidos.length > 0 && validos.length > 0) {
+      if (invalidos.length > 0) {
         await sendText(telefone, [
-          'Alguns números estão incompletos (sem DDD):',
-          ...invalidos.map(n => `• ${n} ← faltando DDD`),
-          '',
-          'Esses foram ignorados. Reenvie com DDD quando quiser.',
+          'Alguns números incompletos (sem DDD) foram ignorados:',
+          ...invalidos.map(n => `• ${n}`),
         ].join('\n'))
       }
 
       if (validos.length) {
         const emLote = validos.length > 1
         if (emLote) await sendText(telefone, `Processando ${validos.length} contato(s)...`)
+
+        const resultados = { vinculado: [], convite: [], erro: [] }
         for (const tel of validos) {
-          await handleConvidarFornecedor(telefone, tel, { silencioso: emLote })
+          try {
+            const r = await handleConvidarFornecedor(telefone, tel, { silencioso: emLote })
+            if (r?.status === 'vinculado') resultados.vinculado.push(tel)
+            else if (r?.status === 'convite_enviado') resultados.convite.push(tel)
+            else resultados.erro.push(tel)
+          } catch (err) {
+            console.error('[cadastrando_fornecedores] erro no contato', tel, err.message)
+            resultados.erro.push(tel)
+          }
         }
-        if (emLote) await sendText(telefone, `${validos.length} contato(s) adicionado(s). Pode enviar mais ou sua lista de produtos quando quiser.`)
+
+        const linhas = []
+        if (resultados.vinculado.length) linhas.push(`• ${resultados.vinculado.length} já cadastrado(s) e vinculado(s)`)
+        if (resultados.convite.length)   linhas.push(`• ${resultados.convite.length} convite(s) enviado(s)`)
+        if (resultados.erro.length)      linhas.push(`• ${resultados.erro.length} falhou — verifique o número`)
+
+        if (!emLote && resultados.erro.length === 0) {
+          // mensagem individual já foi enviada dentro de handleConvidarFornecedor
+        } else {
+          await sendText(telefone, [
+            linhas.length ? 'Processamento concluído:' : 'Não foi possível processar os contatos.',
+            ...linhas,
+            '',
+            'Pode enviar mais números ou sua lista de produtos quando quiser.',
+          ].join('\n'))
+        }
         return { ok: true }
       }
 
-      // Não é número — encerra o estado e devolve null para o webhook processar normalmente
+      // Não é número — encerra e deixa o webhook processar normalmente
       await supabase.from('onboarding_sessoes')
         .update({ etapa: 'concluido', atualizado_em: new Date().toISOString() })
         .eq('telefone', telefone)
@@ -542,71 +563,76 @@ function formatarCNPJ(digits) {
 
 export async function handleConvidarFornecedor(telefoneComerciant, telefoneFornecedor, opts = {}) {
   const silencioso = opts.silencioso ?? false
-  const { data: comerciante } = await supabase
-    .from('comerciantes')
-    .select('*')
-    .eq('telefone', telefoneComerciant)
-    .single()
-  if (!comerciante) return { ok: false }
 
-  // Verifica se rep já existe no Kota
+  // Garante que o comerciante existe (findOrCreate)
+  let comerciante
+  const { data: comExistente } = await supabase
+    .from('comerciantes').select('*').eq('telefone', telefoneComerciant).single()
+  if (comExistente) {
+    comerciante = comExistente
+  } else {
+    const { data: comNovo } = await supabase
+      .from('comerciantes')
+      .insert({ telefone: telefoneComerciant, nome: telefoneComerciant })
+      .select().single()
+    comerciante = comNovo
+  }
+
+  if (!comerciante) {
+    console.error('[handleConvidarFornecedor] comerciante não encontrado:', telefoneComerciant)
+    return { ok: false }
+  }
+
   const rep = await findRepresentanteByTelefone(telefoneFornecedor)
 
   if (rep) {
+    // Já cadastrado — cria vínculo direto
     await criarVinculo(comerciante.id, rep.id)
-    if (!silencioso) {
-      await sendText(telefoneComerciant, [
-        `*${rep.nome}* (${rep.empresa ?? ''}) já está no Kota e foi vinculado como seu fornecedor.`,
-        'Ele receberá suas cotações automaticamente.',
-        '',
-        'Pode enviar mais números ou enviar sua lista de produtos quando quiser.',
-      ].join('\n'))
-    } else {
-      await sendText(telefoneComerciant,
-        `*${rep.nome}* (${rep.empresa ?? ''}) vinculado.`
-      )
-    }
-    await sendText(telefoneFornecedor, [
-      `*${comerciante.nome ?? 'Um comerciante'}* (${comerciante.empresa ?? ''}) adicionou você como cliente no Kota.`,
-      'Você receberá as cotações desse cliente automaticamente.',
+
+    await sendText(telefoneComerciant, [
+      `*${rep.nome}* (${rep.empresa ?? ''}) já está no Kota.`,
+      'Vínculo criado — ele já receberá suas cotações.',
     ].join('\n'))
-  } else {
-    // Novo fornecedor — usa template aprovado (alcança números que nunca interagiram com o Kota)
-    await supabase.from('convites_pendentes').upsert({
-      comerciante_id:      comerciante.id,
-      telefone_fornecedor: telefoneFornecedor,
-      aceito:              false,
-      criado_em:           new Date().toISOString(),
-    }, { onConflict: 'comerciante_id,telefone_fornecedor', ignoreDuplicates: true })
 
-    const nomeComerciant = comerciante.empresa ?? comerciante.nome ?? 'Um comerciante'
-    const templateResult = await sendTemplate(telefoneFornecedor, 'convite_fornecedor', [nomeComerciant])
+    await sendText(telefoneFornecedor, [
+      `*${comerciante.nome ?? comerciante.empresa ?? 'Um comerciante'}* adicionou você como cliente no Kota.`,
+      'Você já receberá as cotações automaticamente.',
+    ].join('\n'))
 
-    console.log(`[convite] template ${telefoneFornecedor} → ok:${templateResult.ok}`, JSON.stringify(templateResult).slice(0, 300))
-
-    if (!templateResult.ok) {
-      const motivo = templateResult.error?.error?.message ?? JSON.stringify(templateResult.error)
-      console.error(`[convite] falha no template para ${telefoneFornecedor}: ${motivo}`)
-      // Sempre avisa o comerciante sobre falha, independente do modo silencioso
-      await sendText(telefoneComerciant, [
-        `Não foi possível enviar o convite para *${telefoneFornecedor}*.`,
-        `Erro: ${motivo}`,
-        '',
-        'Verifique se o número está correto.',
-      ].join('\n'))
-      return { ok: false }
-    }
-
-    // Sucesso — avisa o comerciante apenas no modo individual
-    if (!silencioso) {
-      await sendText(telefoneComerciant, [
-        `Convite enviado para *${telefoneFornecedor}*.`,
-        'Quando o fornecedor confirmar, o vínculo é criado automaticamente.',
-        '',
-        'Pode enviar mais números ou sua lista de produtos quando quiser.',
-      ].join('\n'))
-    }
+    return { ok: true, status: 'vinculado' }
   }
 
-  return { ok: true }
+  // Não cadastrado — envia template de convite
+  await supabase.from('convites_pendentes').upsert({
+    comerciante_id:      comerciante.id,
+    telefone_fornecedor: telefoneFornecedor,
+    aceito:              false,
+    criado_em:           new Date().toISOString(),
+  }, { onConflict: 'comerciante_id,telefone_fornecedor', ignoreDuplicates: true })
+
+  const nomeComerciant = comerciante.empresa ?? comerciante.nome ?? 'Um comerciante'
+  const templateResult = await sendTemplate(telefoneFornecedor, 'convite_fornecedor', [nomeComerciant])
+
+  console.log(`[convite] template ${telefoneFornecedor} → ok:${templateResult.ok}`, JSON.stringify(templateResult).slice(0, 200))
+
+  if (!templateResult.ok) {
+    const motivo = templateResult.error?.error?.message ?? JSON.stringify(templateResult.error)
+    console.error(`[convite] falha no template para ${telefoneFornecedor}: ${motivo}`)
+    await sendText(telefoneComerciant, [
+      `Não foi possível enviar o convite para *${telefoneFornecedor}*.`,
+      `Erro: ${motivo}`,
+      'Verifique se o número está correto.',
+    ].join('\n'))
+    return { ok: false, status: 'erro' }
+  }
+
+  if (!silencioso) {
+    await sendText(telefoneComerciant, [
+      `Convite enviado para *${telefoneFornecedor}*.`,
+      'Assim que confirmar, o vínculo é criado e você será notificado.',
+    ].join('\n'))
+  }
+
+  return { ok: true, status: 'convite_enviado' }
 }
+
