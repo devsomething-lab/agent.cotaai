@@ -9,7 +9,7 @@ import { upsertCatalogoEmLote, salvarPromocao } from '../db/catalogo.js'
 import { sendText, sendTextOrTemplate, downloadMedia, normalizeMetaPayload,
          templateCotacaoParaRep, templateComparativo, templatePedidoConfirmado } from '../services/whatsapp.js'
 import * as XLSX from 'xlsx'
-import { handleAutocadastro, getSessaoOnboarding, handleOnboardingComerciantge, getSessaoOnboardingComerciantge, handleConvidarFornecedor } from './onboarding.js'
+import { handleAutocadastro, getSessaoOnboarding, handleOnboardingComerciantge, getSessaoOnboardingComerciantge, handleConvidarFornecedor, iniciarOnboardingRepPorConvite } from './onboarding.js'
 import { criarVinculo, removerVinculo, getRepresentantesVinculados, getComerciantesVinculados,
          findRepByCodigoConvite, gerarCodigoConvite } from '../db/vinculos.js'
 import 'dotenv/config'
@@ -108,15 +108,28 @@ export async function handleWebhook(payload) {
     return handleAutocadastro(phone, message)
   }
 
-  // 2. Verifica se é keyword de cadastro ou resposta ao convite
+  // 2. Resposta ao template de convite — SEMPRE verifica convite pendente primeiro
+  // (independente de o número já ter outro cadastro)
   const msgLower = (message ?? '').trim().toLowerCase()
-  if (msgLower === 'cadastro' || msgLower === 'cadastrar' ||
-      msgLower === 'sim' || msgLower === 'confirmar') {
-    const rep = await findRepresentanteByTelefone(phone)
-    const { data: com } = await supabase.from('comerciantes').select('empresa').eq('telefone', phone).single()
-    if (!rep && !com?.empresa) {
-      return handleAutocadastro(phone, message)
+  if (msgLower === 'confirmar' || msgLower === 'sim' || msgLower === 'ok') {
+    const { data: convitePendente } = await supabase
+      .from('convites_pendentes')
+      .select('id, comerciante_id')
+      .eq('telefone_fornecedor', phone)
+      .eq('aceito', false)
+      .order('criado_em', { ascending: false })
+      .limit(1)
+      .single()
+
+    if (convitePendente) {
+      // Tem convite pendente — inicia onboarding de representante
+      return iniciarOnboardingRepPorConvite(phone)
     }
+  }
+
+  // 3. Keyword de cadastro direto
+  if (msgLower === 'cadastro' || msgLower === 'cadastrar') {
+    return handleAutocadastro(phone, message)
   }
 
   // 3. Rota normal: representante ou comerciante

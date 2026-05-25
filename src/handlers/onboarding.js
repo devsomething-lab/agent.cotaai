@@ -108,6 +108,11 @@ async function processarSelecaoPerfil(telefone, sessao, message) {
 //  ONBOARDING DO REPRESENTANTE
 // ══════════════════════════════════════════════════════════════
 
+// Iniciado via botão "Confirmar" do template de convite
+export async function iniciarOnboardingRepPorConvite(telefone) {
+  return iniciarOnboardingRep(telefone)
+}
+
 async function iniciarOnboardingRep(telefone) {
   await supabase.from('onboarding_sessoes').upsert({
     telefone,
