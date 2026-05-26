@@ -513,11 +513,15 @@ async function processarEtapaComerciantge(telefone, sessao, message) {
         return { ok: true }
       }
 
-      // Não é número — encerra e deixa o webhook processar normalmente
+      // Nao e numero de telefone — detecta se parece lista de produtos
+      const pareceListaProdutos = texto.length > 10 && /[a-zA-ZÀ-ú]{3,}/.test(texto)
       await supabase.from('onboarding_sessoes')
         .update({ etapa: 'concluido', atualizado_em: new Date().toISOString() })
         .eq('telefone', telefone)
-      return null
+      if (pareceListaProdutos) {
+        await sendText(telefone, 'Entendido! Vou processar sua lista de produtos agora.')
+      }
+      return null // webhook continua e processa a mensagem pelo fluxo de cotacao
     }
     default: return null
   }

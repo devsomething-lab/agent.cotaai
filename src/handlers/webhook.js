@@ -156,7 +156,10 @@ export async function handleWebhook(payload) {
   // 4. Verifica onboarding do comerciante em andamento
   const sessaoComerciantge = await getSessaoOnboardingComerciantge(phone)
   if (sessaoComerciantge) {
-    return handleOnboardingComerciantge(phone, message)
+    const resultadoOnboarding = await handleOnboardingComerciantge(phone, message)
+    // null = onboarding concluiu nesta mensagem (ex: lista em cadastrando_fornecedores)
+    // nao descarta: continua para processar a mensagem normalmente
+    if (resultadoOnboarding !== null) return resultadoOnboarding
   }
 
   // 5. Comerciante existente com cadastro completo
