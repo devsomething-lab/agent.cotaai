@@ -253,6 +253,9 @@ export function normalizeMetaPayload(body) {
       case 'interactive':
         type = 'texto'
         message = msg.interactive?.button_reply?.title ?? msg.interactive?.list_reply?.title ?? null; break
+      case 'button':
+        // Clique em botão de template (ex: "Confirmar" no convite de fornecedor)
+        type = 'texto'; message = msg.button?.text ?? null; break
       default:
         type = 'texto'; message = msg.text?.body ?? null
     }
