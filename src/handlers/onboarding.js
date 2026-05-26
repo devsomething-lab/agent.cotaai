@@ -629,7 +629,7 @@ export async function handleConvidarFornecedor(telefoneComerciant, telefoneForne
     telefone_fornecedor: telefoneFornecedor,
     aceito:              false,
     criado_em:           new Date().toISOString(),
-  }, { onConflict: 'comerciante_id,telefone_fornecedor', ignoreDuplicates: true })
+  }, { onConflict: 'comerciante_id,telefone_fornecedor' })
 
   const nomeComerciant = comerciante.empresa ?? comerciante.nome ?? 'Um comerciante'
   const templateResult = await sendTemplate(telefoneFornecedor, 'convite_fornecedor', [nomeComerciant])
