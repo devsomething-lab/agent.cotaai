@@ -5,6 +5,24 @@ import { findRepresentanteByTelefone } from '../db/client.js'
 
 const TEMPLATE_CATALOGO_URL = process.env.TEMPLATE_CATALOGO_URL ?? null
 
+// ── Normalização de número brasileiro (8 vs 9 dígitos) ───────────────
+// A Meta às vezes entrega/armazena o número sem o 9 do celular (554791267785)
+// enquanto o usuário digitou com o 9 (5547991267785). Esta função retorna
+// ambos os candidatos para buscas no banco.
+function telefoneCandidatos(tel) {
+  const digits = (tel ?? '').replace(/\D/g, '')
+  const set = new Set([digits])
+  if (digits.startsWith('55') && digits.length === 13) {
+    // 55 + DDD(2) + 9 + numero(8) → remove o 9
+    set.add('55' + digits.slice(2, 4) + digits.slice(5))
+  }
+  if (digits.startsWith('55') && digits.length === 12) {
+    // 55 + DDD(2) + numero(8) → adiciona o 9
+    set.add('55' + digits.slice(2, 4) + '9' + digits.slice(4))
+  }
+  return [...set]
+}
+
 // ── Verifica sessão ativa ─────────────────────────────────────────────
 
 export async function getSessaoOnboarding(telefone) {
@@ -260,19 +278,22 @@ async function processarEtapaRep(telefone, sessao, message) {
         }
 
         // Verifica convites pendentes e cria vínculos
+        // Usa telefoneCandidatos para lidar com variação 8/9 dígitos brasileiros
         if (rep) {
           try {
+            const candidatos = telefoneCandidatos(telefone)
             const { data: convitesPendentes } = await supabase
               .from('convites_pendentes')
-              .select('comerciante_id, comerciantes(nome, empresa, telefone)')
-              .eq('telefone_fornecedor', telefone)
+              .select('comerciante_id, telefone_fornecedor, comerciantes(nome, empresa, telefone)')
+              .in('telefone_fornecedor', candidatos)
               .eq('aceito', false)
+            console.log(`[onboarding] convites pendentes para ${telefone} (candidatos: ${candidatos}): ${convitesPendentes?.length ?? 0}`)
             for (const convite of convitesPendentes ?? []) {
               await criarVinculo(convite.comerciante_id, rep.id)
               await supabase.from('convites_pendentes')
                 .update({ aceito: true })
                 .eq('comerciante_id', convite.comerciante_id)
-                .eq('telefone_fornecedor', telefone)
+                .eq('telefone_fornecedor', convite.telefone_fornecedor)
               const com = convite.comerciantes
               if (com?.telefone) {
                 await sendText(com.telefone, [

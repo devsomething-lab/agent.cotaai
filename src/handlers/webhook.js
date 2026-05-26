@@ -14,6 +14,20 @@ import { criarVinculo, removerVinculo, getRepresentantesVinculados, getComercian
          findRepByCodigoConvite, gerarCodigoConvite } from '../db/vinculos.js'
 import 'dotenv/config'
 
+// ── Normalização de número brasileiro (8 vs 9 dígitos) ───────────────
+// A Meta às vezes entrega/armazena o número sem o 9 do celular.
+function telefoneCandidatos(tel) {
+  const digits = (tel ?? '').replace(/\D/g, '')
+  const set = new Set([digits])
+  if (digits.startsWith('55') && digits.length === 13) {
+    set.add('55' + digits.slice(2, 4) + digits.slice(5))
+  }
+  if (digits.startsWith('55') && digits.length === 12) {
+    set.add('55' + digits.slice(2, 4) + '9' + digits.slice(4))
+  }
+  return [...set]
+}
+
 const TIMEOUT_HORAS = parseInt(process.env.COTACAO_TIMEOUT_HORAS ?? '24')
 
 // ── Estado transiente para fluxos de vínculo ─────────────────────────
@@ -112,10 +126,11 @@ export async function handleWebhook(payload) {
   // (independente de o número já ter outro cadastro)
   const msgLower = (message ?? '').trim().toLowerCase()
   if (msgLower === 'confirmar' || msgLower === 'sim' || msgLower === 'ok') {
+    const candidatos = telefoneCandidatos(phone)
     const { data: convitePendente } = await supabase
       .from('convites_pendentes')
       .select('id, comerciante_id')
-      .eq('telefone_fornecedor', phone)
+      .in('telefone_fornecedor', candidatos)
       .eq('aceito', false)
       .order('criado_em', { ascending: false })
       .limit(1)
