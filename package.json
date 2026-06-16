@@ -4,9 +4,10 @@
   "description": "CotAI – Hub de cotação inteligente via WhatsApp",
   "type": "module",
   "main": "src/server.js",
-  "scripts": {
-    "dev": "node --watch src/server.js",
-    "start": "node src/server.js",
+"scripts": {
+  "dev": "node --watch src/server.js",
+  "start": "node src/server.js",
+  "test": "node test/runner.mjs",
     "db:migrate": "node src/db/migrate.js"
   },
   "dependencies": {
