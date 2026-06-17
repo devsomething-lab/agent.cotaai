@@ -3,7 +3,8 @@ import { supabase, findOrCreateComercianteByTelefone, findRepresentanteByTelefon
          getAllRepresentantesAtivos } from '../db/client.js'
 import { extrairListaProdutos, estruturarRespostaRep, transcreverAudio } from '../agents/extractor.js'
 import { extrairCatalogo, classificarMensagemRep } from '../agents/catalogo_agent.js'
-import { consolidarPropostas, gerarResumoNegociacao } from '../agents/consolidator.js'
+import { consolidarPropostas, gerarResumoNegociacao, compararPorItem,
+         montarPedidoOtimizado, montarPedidoFornecedorUnico, montarPedidoManual } from '../agents/consolidator.js'
 import { resolverCotacaoAutomatica, salvarPropostasAutomaticas } from '../agents/auto_quote.js'
 import { upsertCatalogoEmLote, salvarPromocao } from '../db/catalogo.js'
 import { sendText, sendTextOrTemplate, downloadMedia, normalizeMetaPayload,
@@ -317,7 +318,7 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
       .from('cotacoes')
       .select('*')
       .eq('comerciante_id', comerciante.id)
-      .in('status', ['aguardando_respostas', 'aguardando_escolha', 'consulta'])
+      .in('status', ['aguardando_respostas', 'aguardando_escolha', 'aguardando_modo_fechamento', 'escolha_item_a_item', 'consulta'])
       .order('criado_em', { ascending: false })
       .limit(1)
       .single()
@@ -371,7 +372,33 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
     return { ok: true }
   }
 
-  // ── Cotação aguardando escolha (modo compra) ──────────────────────
+  // ── Cotação aguardando escolha do modo de fechamento ou loop item a item ──
+  const { data: cotacaoFechamento } = await supabase
+    .from('cotacoes')
+    .select('*')
+    .eq('comerciante_id', comerciante.id)
+    .in('status', ['aguardando_modo_fechamento', 'escolha_item_a_item'])
+    .order('criado_em', { ascending: false })
+    .limit(1)
+    .single()
+
+  if (cotacaoFechamento && message) {
+    // Lock por cotação — descarta segundo request paralelo
+    if (!lockCotacao(cotacaoFechamento.id)) {
+      console.log(`[webhook] cotação ${cotacaoFechamento.id} em processamento — descartando request paralelo`)
+      return { ok: true, skipped: true, reason: 'cotacao_locked' }
+    }
+    try {
+      if (cotacaoFechamento.status === 'escolha_item_a_item') {
+        return await handleEscolhaItemAItem({ comerciante, cotacao: cotacaoFechamento, message, phone })
+      }
+      return await handleModoFechamento({ comerciante, cotacao: cotacaoFechamento, message, phone })
+    } finally {
+      unlockCotacao(cotacaoFechamento.id)
+    }
+  }
+
+  // ── Cotação aguardando escolha (modo compra) — fluxo legado ───────
   const { data: cotacaoAguardandoEscolha } = await supabase
     .from('cotacoes')
     .select('*')
@@ -459,7 +486,7 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
 
     if (cotacaoConsulta) {
       await supabase.from('cotacoes')
-        .update({ status: 'aguardando_escolha', obs_interna: null })
+        .update({ status: 'aguardando_modo_fechamento', obs_interna: null })
         .eq('id', cotacaoConsulta.id)
       return handleReenviarComparativo(comerciante, cotacaoConsulta, phone)
     }
@@ -470,7 +497,7 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
     .from('cotacoes')
     .select('*')
     .eq('comerciante_id', comerciante.id)
-    .in('status', ['aguardando_respostas', 'aguardando_escolha', 'consulta'])
+    .in('status', ['aguardando_respostas', 'aguardando_escolha', 'aguardando_modo_fechamento', 'escolha_item_a_item', 'consulta'])
     .order('criado_em', { ascending: false })
     .limit(1)
     .single()
@@ -1018,12 +1045,13 @@ export async function consolidarEEnviar(cotacaoId) {
       .eq('cotacao_id', cotacaoId).eq('representante_id', rep.id)
   }
 
-  await supabase.from('cotacoes').update({ status: 'aguardando_escolha' }).eq('id', cotacaoId)
+  await supabase.from('cotacoes').update({ status: 'aguardando_modo_fechamento', obs_interna: null }).eq('id', cotacaoId)
 
   // Feature 3: gera resumo em linguagem natural com trade-offs
   const resumo = await gerarResumoNegociacao(consolidado)
 
-  const msgComparativo = templateComparativoComIntencao(consolidado, cotacaoId, resumo)
+  const comparacao = compararPorItem(itens, propostas)
+  const msgComparativo = templateComparativoPorItem(comparacao, cotacaoId, resumo)
   await sendText(cotacao.comerciantes.telefone, msgComparativo)
 }
 
@@ -1111,7 +1139,7 @@ async function handleVerCotacaoAtual(comerciante, phone) {
     .from('cotacoes')
     .select('*')
     .eq('comerciante_id', comerciante.id)
-    .in('status', ['aguardando_respostas', 'aguardando_escolha', 'consulta'])
+    .in('status', ['aguardando_respostas', 'aguardando_escolha', 'aguardando_modo_fechamento', 'escolha_item_a_item', 'consulta'])
     .order('criado_em', { ascending: false })
     .limit(1)
     .single()
@@ -1122,9 +1150,11 @@ async function handleVerCotacaoAtual(comerciante, phone) {
   }
 
   const statusMsg = {
-    aguardando_respostas: 'Aguardando respostas dos fornecedores',
-    aguardando_escolha:   '📊 Comparativo pronto — aguardando sua escolha',
-    consulta:             'Salva para consulta',
+    aguardando_respostas:       'Aguardando respostas dos fornecedores',
+    aguardando_escolha:         '📊 Comparativo pronto — aguardando sua escolha',
+    aguardando_modo_fechamento: '📊 Comparativo pronto — escolha como fechar',
+    escolha_item_a_item:        '🛒 Escolhendo fornecedor item a item',
+    consulta:                   'Salva para consulta',
   }[cotacao.status] ?? cotacao.status
 
   const itensCotacao = await supabase.from('cotacao_itens').select('*').eq('cotacao_id', cotacao.id).order('ordem')
@@ -1142,6 +1172,8 @@ async function handleVerCotacaoAtual(comerciante, phone) {
     itensStr,
     '',
     cotacao.status === 'aguardando_escolha' ? 'Envie *comprar* para ver o comparativo e fechar o pedido.' :
+    cotacao.status === 'aguardando_modo_fechamento' ? 'Responda *1*, *2*, *3* ou *4* para escolher como fechar o pedido.' :
+    cotacao.status === 'escolha_item_a_item' ? 'Continue escolhendo o fornecedor de cada item.' :
     cotacao.status === 'consulta' ? 'Envie *comprar* para retomar e fechar o pedido.' :
     'Aguarde as respostas dos fornecedores.',
   ].join('\n'))
@@ -1155,7 +1187,7 @@ async function handleCancelarCotacao(comerciante, phone) {
     .from('cotacoes')
     .select('*')
     .eq('comerciante_id', comerciante.id)
-    .in('status', ['aguardando_respostas', 'aguardando_escolha', 'consulta'])
+    .in('status', ['aguardando_respostas', 'aguardando_escolha', 'aguardando_modo_fechamento', 'escolha_item_a_item', 'consulta'])
     .order('criado_em', { ascending: false })
     .limit(1)
     .single()
@@ -1185,8 +1217,8 @@ async function handleHistorico(comerciante, phone) {
   }
 
   const statusEmoji = {
-    pedido_gerado: '✅', aguardando_escolha: '📊', aguardando_respostas: '⏳',
-    consulta: '🔍', cancelada: '❌'
+    pedido_gerado: '✅', aguardando_escolha: '📊', aguardando_modo_fechamento: '📊',
+    escolha_item_a_item: '🛒', aguardando_respostas: '⏳', consulta: '🔍', cancelada: '❌'
   }
 
   const linhas = cotacoes.map(c => 
@@ -1412,64 +1444,384 @@ async function handleReenviarComparativo(comerciante, cotacao, phone) {
     return { ok: true }
   }
 
-  const consolidado = consolidarPropostas(itens, propostas)
-  const msg = templateComparativoComIntencao(consolidado, cotacao.id)
+  // Garante que voltamos ao estado de escolha de modo, sem sub-estado pendente
+  await supabase.from('cotacoes')
+    .update({ status: 'aguardando_modo_fechamento', obs_interna: null })
+    .eq('id', cotacao.id)
+
+  const comparacao = compararPorItem(itens, propostas)
+  const msg = templateComparativoPorItem(comparacao, cotacao.id)
   await sendText(phone, msg)
   return { ok: true }
 }
 
-// ── Template comparativo com pergunta de intenção ─────────────────────
-function templateComparativoComIntencao(consolidado, cotacaoId, resumo = null) {
-  const { propostas } = consolidado
+// ── ENTREGÁVEL: escolha de fechamento pelo comerciante ────────────────
+// Após o comparativo, o comerciante escolhe COMO fechar:
+//   1 split_auto       → melhor fornecedor por item (pode gerar N pedidos)
+//   2 fornecedor_unico → tudo com o melhor no geral (sistema escolhe)
+//   3 fornecedor_unico → tudo com um único rep escolhido por ele
+//   4 manual           → escolhe o fornecedor item a item (loop)
 
-  const reps = [...new Set(propostas.map(p => p.representantes?.nome))]
-  const msg = [`*Cotação #${cotacaoId.slice(-6).toUpperCase()}*`]
+async function handleModoFechamento({ comerciante, cotacao, message, phone }) {
+  const cmd = (message ?? '').trim().toLowerCase()
+  const obs = cotacao.obs_interna ?? ''
 
-  for (const rep of reps) {
-    const props = propostas.filter(p => p.representantes?.nome === rep)
-    const empresa = props[0]?.representantes?.empresa ?? ''
-    const pg = props[0]?.prazo_pagamento_dias
-    const en = props[0]?.prazo_entrega_dias
-    const origem = props[0]?.origem // catalogo | manual | promocao
-    const criadoEm = props[0]?.criado_em
-      ? new Date(props[0].criado_em).toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' })
-      : null
+  // Comandos auxiliares disponíveis a qualquer momento
+  if (cmd === 'consulta' || cmd === 'so consulta' || cmd === 'só consulta') {
+    await supabase.from('cotacoes').update({ status: 'consulta', obs_interna: null }).eq('id', cotacao.id)
+    await sendText(phone, [
+      'Beleza! Salvei sua cotação para consulta.',
+      'Envie *comprar* quando quiser fechar o pedido.',
+    ].join('\n'))
+    return { ok: true }
+  }
+  if (cmd === 'descartar' || cmd === 'nova cotacao' || cmd === 'nova cotação' || cmd === 'cancelar') {
+    return handleCancelarParaNovaCotacao(comerciante, cotacao, phone)
+  }
 
-    msg.push('')
-    msg.push(`*${rep}* · ${empresa}`)
-
-    // Informa origem da resposta
-    if (origem === 'catalogo' || origem === 'promocao') {
-      msg.push(`Catálogo · atualizado em ${criadoEm ?? '—'}`)
-    } else {
-      msg.push(`Resposta manual · ${criadoEm ?? '—'}`)
+  // ── Sub-estado: confirmando um pedido já montado (split ou único) ──
+  if (obs.startsWith('confirmando:')) {
+    if (cmd === '0' || cmd === 'voltar') {
+      return handleReenviarComparativo(comerciante, cotacao, phone)
     }
-
-    msg.push('')
-    msg.push('Preço por item:')
-    for (const p of props) {
-      const marca = p.marca ? ` (${p.marca})` : ''
-      msg.push(`${p.produto}${marca}: R$ ${p.preco_unitario?.toFixed(2)}`)
+    if (cmd === '1' || cmd === 'sim' || cmd === 'confirmar' || cmd === 'confirmo') {
+      const { itens } = await getCotacaoComItens(cotacao.id)
+      const propostas = await getPropostasDaCotacao(cotacao.id)
+      let resultado, modo
+      if (obs === 'confirmando:split_auto') {
+        resultado = montarPedidoOtimizado(itens, propostas)
+        modo = 'split_auto'
+      } else {
+        const repId = obs.split(':')[2]
+        resultado = montarPedidoFornecedorUnico(itens, propostas, repId)
+        modo = 'fornecedor_unico'
+      }
+      return finalizarPedidos({ comerciante, cotacao, resultado, modo, phone })
     }
+    await sendText(phone, 'Responda *1* para confirmar ou *0* para voltar ao comparativo.')
+    return { ok: true }
+  }
 
+  // ── Sub-estado: escolhendo qual é o fornecedor único (opção 3) ──
+  if (obs === 'escolhendo:fornecedor_unico') {
+    if (cmd === '0' || cmd === 'voltar') {
+      return handleReenviarComparativo(comerciante, cotacao, phone)
+    }
+    const { itens } = await getCotacaoComItens(cotacao.id)
+    const propostas = await getPropostasDaCotacao(cotacao.id)
+    const consolidado = consolidarPropostas(itens, propostas)
+    const reps = consolidado?.rankingFornecedores ?? []
+    let rep = null
+    const n = parseInt(cmd)
+    if (!isNaN(n) && n >= 1 && n <= reps.length) rep = reps[n - 1]
+    else rep = reps.find(r => cmd.includes(r.nome.toLowerCase()) || (r.empresa && cmd.includes(r.empresa.toLowerCase())))
+    if (!rep) {
+      await sendText(phone, 'Não entendi. Envie o *número* do fornecedor (ou *0* para voltar).')
+      return { ok: true }
+    }
+    const resultado = montarPedidoFornecedorUnico(itens, propostas, rep.id)
+    await supabase.from('cotacoes').update({ obs_interna: `confirmando:fornecedor_unico:${rep.id}` }).eq('id', cotacao.id)
+    await sendText(phone, templateResumoPedido(resultado, cotacao.id, `Fornecedor único — ${rep.nome}`))
+    return { ok: true }
+  }
+
+  // ── Escolha inicial do modo de fechamento ──
+  if (cmd === '1') {
+    const { itens } = await getCotacaoComItens(cotacao.id)
+    const propostas = await getPropostasDaCotacao(cotacao.id)
+    const resultado = montarPedidoOtimizado(itens, propostas)
+    if (!resultado.grupos.length) {
+      await sendText(phone, 'Não consegui montar o split — nenhuma proposta válida.')
+      return { ok: true }
+    }
+    await supabase.from('cotacoes')
+      .update({ obs_interna: 'confirmando:split_auto', modo_fechamento: 'split_auto' })
+      .eq('id', cotacao.id)
+    await sendText(phone, templateResumoPedido(resultado, cotacao.id, 'Split automático'))
+    return { ok: true }
+  }
+  if (cmd === '2') {
+    const { itens } = await getCotacaoComItens(cotacao.id)
+    const propostas = await getPropostasDaCotacao(cotacao.id)
+    const consolidado = consolidarPropostas(itens, propostas)
+    const melhor = consolidado?.melhorFornecedor
+    if (!melhor) {
+      await sendText(phone, 'Ainda não há propostas para fechar.')
+      return { ok: true }
+    }
+    const resultado = montarPedidoFornecedorUnico(itens, propostas, melhor.id)
+    await supabase.from('cotacoes')
+      .update({ obs_interna: `confirmando:fornecedor_unico:${melhor.id}`, modo_fechamento: 'fornecedor_unico' })
+      .eq('id', cotacao.id)
+    await sendText(phone, templateResumoPedido(resultado, cotacao.id, `Fornecedor único — ${melhor.nome} (melhor no geral)`))
+    return { ok: true }
+  }
+  if (cmd === '3') {
+    await supabase.from('cotacoes')
+      .update({ obs_interna: 'escolhendo:fornecedor_unico', modo_fechamento: 'fornecedor_unico' })
+      .eq('id', cotacao.id)
+    return handlePedirEscolhaFornecedor(comerciante, cotacao, phone)
+  }
+  if (cmd === '4') {
+    const { itens } = await getCotacaoComItens(cotacao.id)
+    const propostas = await getPropostasDaCotacao(cotacao.id)
+    const comparacao = compararPorItem(itens, propostas)
+    const estado = { i: 0, escolhas: {} }
+    await supabase.from('cotacoes')
+      .update({ status: 'escolha_item_a_item', modo_fechamento: 'manual', obs_interna: `itemaitem:${JSON.stringify(estado)}` })
+      .eq('id', cotacao.id)
+    return avancarManual({ comerciante, cotacao, phone, comparacao, itens, propostas, estado })
+  }
+
+  // Não reconhecido — repete as opções
+  await sendText(phone, templateOpcoesFechamento())
+  return { ok: true }
+}
+
+// ── Gera os pedidos a partir dos grupos e notifica todos os envolvidos ──
+async function finalizarPedidos({ comerciante, cotacao, resultado, modo, phone }) {
+  if (!resultado.grupos.length) {
+    await sendText(phone, 'Não há propostas para fechar o pedido.')
+    return { ok: false }
+  }
+
+  const criados = []
+  for (const grupo of resultado.grupos) {
+    const { data: pedido } = await supabase.from('pedidos').insert({
+      cotacao_id:           cotacao.id,
+      comerciante_id:       comerciante.id,
+      representante_id:     grupo.rep.id,
+      valor_total:          grupo.subtotal,
+      prazo_pagamento_dias: grupo.rep.prazo_pagamento_dias,
+      prazo_entrega_dias:   grupo.rep.prazo_entrega_dias,
+    }).select().single()
+
+    await supabase.from('pedido_itens').insert(grupo.itens.map(it => ({
+      pedido_id:      pedido.id,
+      produto:        it.produto,
+      marca:          it.marca,
+      quantidade:     it.quantidade,
+      preco_unitario: it.preco_unitario,
+      preco_total:    it.preco_total,
+    })))
+
+    criados.push({ pedido, grupo })
+
+    // Notifica o representante
+    const resumoRep = grupo.itens.map(it => `• ${it.produto} ×${it.quantidade ?? 1} — R$ ${it.preco_total?.toFixed(2)}`).join('\n')
+    await sendText(grupo.rep.telefone, [
+      `*Pedido #${pedido.id.slice(-6).toUpperCase()} recebido!*`, '',
+      `Cliente: ${comerciante.nome} (${comerciante.telefone})`, '',
+      resumoRep, '',
+      `*Total: R$ ${grupo.subtotal.toFixed(2)}*`,
+      `Pagamento: ${grupo.rep.prazo_pagamento_dias ?? '?'}d | Entrega: ${grupo.rep.prazo_entrega_dias ?? '?'}d`,
+    ].join('\n'))
+  }
+
+  await supabase.from('cotacoes')
+    .update({ status: 'pedido_gerado', modo_fechamento: modo, obs_interna: null, fechado_em: new Date().toISOString() })
+    .eq('id', cotacao.id)
+
+  // Resumo ao comerciante
+  const linhas = []
+  for (const { pedido, grupo } of criados) {
+    linhas.push(`*${grupo.rep.nome}*${grupo.rep.empresa ? ` · ${grupo.rep.empresa}` : ''} — Pedido #${pedido.id.slice(-6).toUpperCase()}`)
+    for (const it of grupo.itens) linhas.push(`  ${it.produto} ×${it.quantidade ?? 1} — R$ ${it.preco_total?.toFixed(2)}`)
+    linhas.push(`  _Subtotal: R$ ${grupo.subtotal.toFixed(2)}_`)
+    linhas.push('')
+  }
+  if (resultado.itensSemProposta?.length) {
+    linhas.push(`_Sem proposta (não incluídos): ${resultado.itensSemProposta.join(', ')}_`)
+    linhas.push('')
+  }
+
+  await sendText(phone, [
+    criados.length > 1 ? `*${criados.length} pedidos gerados (split):*` : '*Pedido confirmado!*',
+    '',
+    ...linhas,
+    `*Total geral: R$ ${resultado.valorTotal.toFixed(2)}*`,
+    criados.length > 1 ? `${criados.length} fornecedores foram notificados.` : 'O fornecedor foi notificado.',
+  ].join('\n'))
+
+  return { ok: true, pedidos: criados.map(c => c.pedido.id), modo }
+}
+
+// ── Loop de escolha item a item (opção 4) ─────────────────────────────
+async function handleEscolhaItemAItem({ comerciante, cotacao, message, phone }) {
+  const cmd = (message ?? '').trim().toLowerCase()
+  const obs = cotacao.obs_interna ?? ''
+
+  if (cmd === 'descartar' || cmd === 'cancelar' || cmd === 'nova cotacao' || cmd === 'nova cotação') {
+    return handleCancelarParaNovaCotacao(comerciante, cotacao, phone)
+  }
+
+  const { itens } = await getCotacaoComItens(cotacao.id)
+  const propostas = await getPropostasDaCotacao(cotacao.id)
+  const comparacao = compararPorItem(itens, propostas)
+
+  // ── Sub-estado: confirmando o resumo final ──
+  if (obs.startsWith('itemaitem-confirmar:')) {
+    if (cmd === '0' || cmd === 'voltar') {
+      const estado = { i: 0, escolhas: {} }
+      await supabase.from('cotacoes').update({ obs_interna: `itemaitem:${JSON.stringify(estado)}` }).eq('id', cotacao.id)
+      return avancarManual({ comerciante, cotacao, phone, comparacao, itens, propostas, estado })
+    }
+    if (cmd === '1' || cmd === 'sim' || cmd === 'confirmar' || cmd === 'confirmo') {
+      const escolhas = JSON.parse(obs.slice('itemaitem-confirmar:'.length))
+      const resultado = montarPedidoManual(itens, propostas, escolhas)
+      return finalizarPedidos({ comerciante, cotacao, resultado, modo: 'manual', phone })
+    }
+    await sendText(phone, 'Responda *1* para confirmar ou *0* para refazer as escolhas.')
+    return { ok: true }
+  }
+
+  // ── Sub-estado: escolhendo o fornecedor do item atual ──
+  let estado
+  try { estado = JSON.parse(obs.slice('itemaitem:'.length)) }
+  catch { estado = { i: 0, escolhas: {} } }
+
+  const atual = comparacao[estado.i]
+  if (!atual) {
+    return mostrarResumoManual({ comerciante, cotacao, phone, itens, propostas, escolhas: estado.escolhas })
+  }
+
+  if (cmd === '0' || cmd === 'voltar') {
+    if (estado.i > 0) {
+      estado.i--
+      const alvo = comparacao[estado.i]
+      if (alvo) delete estado.escolhas[alvo.item.id]
+      return avancarManual({ comerciante, cotacao, phone, comparacao, itens, propostas, estado })
+    }
+    return handleReenviarComparativo(comerciante, cotacao, phone)
+  }
+
+  if (cmd === 'pular' || cmd === 'pula') {
+    estado.i++
+    return avancarManual({ comerciante, cotacao, phone, comparacao, itens, propostas, estado })
+  }
+
+  // Seleção numérica (ou por nome) do fornecedor para o item atual
+  const n = parseInt(cmd)
+  let oferta = null
+  if (!isNaN(n) && n >= 1 && n <= atual.ofertas.length) oferta = atual.ofertas[n - 1]
+  else oferta = atual.ofertas.find(o => cmd.includes(o.nome.toLowerCase()))
+
+  if (!oferta) {
+    return avancarManual({ comerciante, cotacao, phone, comparacao, itens, propostas, estado, repetir: true })
+  }
+
+  estado.escolhas[atual.item.id] = oferta.representante_id
+  estado.i++
+  return avancarManual({ comerciante, cotacao, phone, comparacao, itens, propostas, estado })
+}
+
+// Avança o loop: pula itens sem proposta, persiste o estado e pergunta o item atual.
+async function avancarManual({ cotacao, phone, comparacao, itens, propostas, estado, repetir = false }) {
+  while (estado.i < comparacao.length && comparacao[estado.i].ofertas.length === 0) {
+    estado.i++
+  }
+
+  if (estado.i >= comparacao.length) {
+    await supabase.from('cotacoes').update({ obs_interna: `itemaitem:${JSON.stringify(estado)}` }).eq('id', cotacao.id)
+    return mostrarResumoManual({ cotacao, phone, itens, propostas, escolhas: estado.escolhas })
+  }
+
+  await supabase.from('cotacoes').update({ obs_interna: `itemaitem:${JSON.stringify(estado)}` }).eq('id', cotacao.id)
+
+  const { item, ofertas } = comparacao[estado.i]
+  const qtdStr = item.quantidade ? ` × ${item.quantidade}` : ''
+  const linhas = ofertas.map((o, i) =>
+    `${i + 1}. ${o.nome} — R$ ${o.preco_unitario?.toFixed(2)}${o.melhor ? ' ⭐' : ''} (pgto ${o.prazo_pagamento_dias ?? '?'}d · entrega ${o.prazo_entrega_dias ?? '?'}d)`)
+
+  const header = repetir
+    ? ['Não entendi — escolha pelo número:', `*${item.produto}${qtdStr}*`]
+    : [`*Item ${estado.i + 1}/${comparacao.length}:* ${item.produto}${qtdStr}`, 'Escolha o fornecedor:']
+
+  await sendText(phone, [
+    ...header,
+    ...linhas,
+    '',
+    'Envie o *número*. *pular* p/ não comprar este item · *0* p/ voltar.',
+  ].join('\n'))
+  return { ok: true }
+}
+
+// Monta o resumo final do modo manual e pede confirmação.
+async function mostrarResumoManual({ cotacao, phone, itens, propostas, escolhas }) {
+  const resultado = montarPedidoManual(itens, propostas, escolhas)
+  if (!resultado.grupos.length) {
+    await sendText(phone, 'Você não escolheu nenhum item. Envie *descartar* para recomeçar.')
+    return { ok: true }
+  }
+  await supabase.from('cotacoes').update({ obs_interna: `itemaitem-confirmar:${JSON.stringify(escolhas)}` }).eq('id', cotacao.id)
+  await sendText(phone, templateResumoPedido(resultado, cotacao.id, 'Item a item'))
+  return { ok: true }
+}
+
+// ── Templates de comparativo e fechamento ─────────────────────────────
+
+// Comparativo por item, com ⭐ no melhor preço de cada item.
+function templateComparativoPorItem(comparacao, cotacaoId, resumo = null) {
+  const msg = [`*Cotação #${cotacaoId.slice(-6).toUpperCase()} — comparativo por item*`]
+
+  comparacao.forEach(({ item, ofertas }, i) => {
+    const qtd = item.quantidade ? ` × ${item.quantidade}` : ''
     msg.push('')
-    msg.push('Condições:')
-    msg.push(`Prazo de Pagamento: ${pg ?? '?'}d`)
-    msg.push(`Prazo de Entrega: ${en ?? '?'}d`)
+    msg.push(`*${i + 1}. ${item.produto}${item.marca ? ` (${item.marca})` : ''}${qtd}*`)
+    if (!ofertas.length) {
+      msg.push('   _sem proposta_')
+      return
+    }
+    for (const o of ofertas) {
+      const estrela = o.melhor ? '⭐ ' : '   '
+      msg.push(`${estrela}${o.nome} — R$ ${o.preco_unitario?.toFixed(2)} (pgto ${o.prazo_pagamento_dias ?? '?'}d · entrega ${o.prazo_entrega_dias ?? '?'}d)`)
+    }
+  })
+
+  if (resumo) {
+    msg.push('')
+    msg.push('—')
+    msg.push(resumo)
   }
 
   msg.push('')
-  msg.push('—')
-  // Feature 3: resumo em linguagem natural com trade-offs (quando disponível)
-  if (resumo) {
-    msg.push(resumo)
+  msg.push(templateOpcoesFechamento())
+  return msg.join('\n')
+}
+
+function templateOpcoesFechamento() {
+  return [
+    '*Como deseja fechar o pedido?*',
+    '1️⃣ Split automático — o melhor preço de cada item',
+    '2️⃣ Fornecedor único — fecho tudo com o melhor no geral',
+    '3️⃣ Fornecedor único — você escolhe qual',
+    '4️⃣ Item a item — você escolhe o fornecedor de cada produto',
+    '',
+    'Ou *consulta* p/ salvar sem comprar · *descartar* p/ nova cotação.',
+  ].join('\n')
+}
+
+// Resumo de um pedido montado (split, único ou manual) antes de confirmar.
+function templateResumoPedido(resultado, cotacaoId, titulo) {
+  const msg = [`*Confira seu pedido — ${titulo}*`, '']
+  for (const grupo of resultado.grupos) {
+    msg.push(`*${grupo.rep.nome}*${grupo.rep.empresa ? ` · ${grupo.rep.empresa}` : ''}`)
+    for (const it of grupo.itens) {
+      msg.push(`  ${it.produto} × ${it.quantidade ?? 1} — R$ ${it.preco_total?.toFixed(2)}`)
+    }
+    msg.push(`  _Subtotal: R$ ${grupo.subtotal.toFixed(2)} · pgto ${grupo.rep.prazo_pagamento_dias ?? '?'}d · entrega ${grupo.rep.prazo_entrega_dias ?? '?'}d_`)
     msg.push('')
   }
-  msg.push('O que deseja fazer?')
-  msg.push('1. Comprar agora — escolher fornecedor e gerar pedido')
-  msg.push('2. Só estava consultando — salvar sem comprar')
-  msg.push('3. Decidir depois — cotação fica salva por 7 dias')
-  msg.push('4. Descartar e fazer nova cotação')
-
+  if (resultado.itensSemProposta?.length) {
+    msg.push(`_Sem proposta (não incluídos): ${resultado.itensSemProposta.join(', ')}_`)
+    msg.push('')
+  }
+  msg.push(`*Total: R$ ${resultado.valorTotal.toFixed(2)}*`)
+  if (resultado.grupos.length > 1) {
+    msg.push(`_${resultado.grupos.length} pedidos serão gerados (um por fornecedor)._`)
+  }
+  msg.push('')
+  msg.push('1. Confirmar pedido')
+  msg.push('0. Voltar')
   return msg.join('\n')
 }

@@ -20,7 +20,7 @@ const BASE_URL  = process.env.TEST_URL ?? 'http://localhost:3000'
 const USE_AI    = !process.argv.includes('--no-ai')
 const FILTRO    = process.argv.slice(2).find(a => !a.startsWith('-') && !a.includes('/'))
 
-const supabase  = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_KEY)
+const supabase  = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_KEY)
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
 // ── Telefones de teste (não são números reais) ────────────────────────
@@ -53,12 +53,28 @@ async function msg(de, texto, tipo = 'text') {
 
 async function limparDadosTeste() {
   const fones = Object.values(FONES)
-  await supabase.from('pedidos').delete().in('comerciante_id',
-    (await supabase.from('comerciantes').select('id').in('telefone', fones)).data?.map(r => r.id) ?? [])
-  await supabase.from('cotacoes').delete().in('comerciante_id',
-    (await supabase.from('comerciantes').select('id').in('telefone', fones)).data?.map(r => r.id) ?? [])
-  await supabase.from('vinculos').delete().in('comerciante_id',
-    (await supabase.from('comerciantes').select('id').in('telefone', fones)).data?.map(r => r.id) ?? [])
+  const comIds = (await supabase.from('comerciantes').select('id').in('telefone', fones)).data?.map(r => r.id) ?? []
+  const repIds = (await supabase.from('representantes').select('id').in('telefone', fones)).data?.map(r => r.id) ?? []
+  const cotIds = comIds.length
+    ? (await supabase.from('cotacoes').select('id').in('comerciante_id', comIds)).data?.map(r => r.id) ?? []
+    : []
+
+  // Filhos primeiro: no banco real, propostas.cotacao_id NÃO tem ON DELETE CASCADE,
+  // então é preciso apagar propostas/envios/itens antes das cotações.
+  if (cotIds.length) {
+    await supabase.from('propostas').delete().in('cotacao_id', cotIds)
+    await supabase.from('cotacao_envios').delete().in('cotacao_id', cotIds)
+    await supabase.from('cotacao_itens').delete().in('cotacao_id', cotIds)
+  }
+  if (repIds.length) {
+    await supabase.from('propostas').delete().in('representante_id', repIds)
+    await supabase.from('vinculos').delete().in('representante_id', repIds)
+  }
+  if (comIds.length) {
+    await supabase.from('pedidos').delete().in('comerciante_id', comIds)   // pedido_itens cascata
+    await supabase.from('cotacoes').delete().in('comerciante_id', comIds)
+    await supabase.from('vinculos').delete().in('comerciante_id', comIds)
+  }
   await supabase.from('convites_pendentes').delete().in('telefone_fornecedor', fones)
   await supabase.from('onboarding_sessoes').delete().in('telefone', fones)
   await supabase.from('representantes').delete().in('telefone', fones)
@@ -67,6 +83,40 @@ async function limparDadosTeste() {
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
+
+// ── Seed determinístico para os testes de fechamento ──────────────────
+// Cria comerciante + 2 reps + cotação já consolidada (status
+// aguardando_modo_fechamento) com propostas, SEM depender de IA/extração.
+// Preços: Café mais barato no rep1, Leite mais barato no rep2.
+async function seedFechamento() {
+  const { data: com } = await supabase.from('comerciantes')
+    .insert({ telefone: FONES.comerciante, nome: 'Pedro Teste', empresa: 'Mercado Teste' }).select().single()
+  const { data: rep1 } = await supabase.from('representantes')
+    .insert({ telefone: FONES.representante, nome: 'Eduardo', empresa: 'Dist A', prazo_pagamento_padrao_dias: 30, prazo_entrega_padrao_dias: 5 }).select().single()
+  const { data: rep2 } = await supabase.from('representantes')
+    .insert({ telefone: FONES.representante2, nome: 'Maria', empresa: 'Dist B', prazo_pagamento_padrao_dias: 20, prazo_entrega_padrao_dias: 2 }).select().single()
+
+  const { data: cot } = await supabase.from('cotacoes')
+    .insert({ comerciante_id: com.id, status: 'aguardando_modo_fechamento', modo: 'automatico', input_raw: 'Café 500g\nLeite 1L', input_tipo: 'texto' }).select().single()
+  const { data: itA } = await supabase.from('cotacao_itens')
+    .insert({ cotacao_id: cot.id, produto: 'Café 500g', quantidade: 2, ordem: 0 }).select().single()
+  const { data: itB } = await supabase.from('cotacao_itens')
+    .insert({ cotacao_id: cot.id, produto: 'Leite 1L', quantidade: 10, ordem: 1 }).select().single()
+
+  const { data: env1 } = await supabase.from('cotacao_envios')
+    .insert({ cotacao_id: cot.id, representante_id: rep1.id, modo_resposta: 'automatico', status: 'respondido', respondido_em: new Date().toISOString() }).select().single()
+  const { data: env2 } = await supabase.from('cotacao_envios')
+    .insert({ cotacao_id: cot.id, representante_id: rep2.id, modo_resposta: 'automatico', status: 'respondido', respondido_em: new Date().toISOString() }).select().single()
+
+  await supabase.from('propostas').insert([
+    { cotacao_envio_id: env1.id, cotacao_id: cot.id, representante_id: rep1.id, cotacao_item_id: itA.id, produto: 'Café 500g', preco_unitario: 10, preco_total: 20, prazo_pagamento_dias: 30, prazo_entrega_dias: 5, origem: 'catalogo' },
+    { cotacao_envio_id: env1.id, cotacao_id: cot.id, representante_id: rep1.id, cotacao_item_id: itB.id, produto: 'Leite 1L',  preco_unitario: 5,  preco_total: 50, prazo_pagamento_dias: 30, prazo_entrega_dias: 5, origem: 'catalogo' },
+    { cotacao_envio_id: env2.id, cotacao_id: cot.id, representante_id: rep2.id, cotacao_item_id: itA.id, produto: 'Café 500g', preco_unitario: 12, preco_total: 24, prazo_pagamento_dias: 20, prazo_entrega_dias: 2, origem: 'catalogo' },
+    { cotacao_envio_id: env2.id, cotacao_id: cot.id, representante_id: rep2.id, cotacao_item_id: itB.id, produto: 'Leite 1L',  preco_unitario: 4,  preco_total: 40, prazo_pagamento_dias: 20, prazo_entrega_dias: 2, origem: 'catalogo' },
+  ])
+
+  return { com, rep1, rep2, cot, itA, itB }
+}
 
 // ── Log collector ─────────────────────────────────────────────────────
 
@@ -208,6 +258,97 @@ const CENARIOS = {
         log.add('ERRO', 'Nenhuma cotação encontrada no banco')
         return { sucesso: false }
       }
+    },
+  },
+
+  // ── 5. Fechamento: split automático ───────────────────────────────
+  fechamento_split_auto: {
+    descricao: 'Comerciante fecha via split automático (melhor preço por item)',
+    esperado: 'Dois pedidos gerados (Café→rep1, Leite→rep2), modo_fechamento=split_auto',
+    passos: async (log) => {
+      await limparDadosTeste()
+      const { rep1, rep2, cot } = await seedFechamento()
+      log.add('SEED', `cotação #${cot.id.slice(-6)} em aguardando_modo_fechamento`)
+
+      log.add('MSG', '[comerciante] "1" (split automático)')
+      await msg(FONES.comerciante, '1'); await sleep(1000)
+      log.add('MSG', '[comerciante] "1" (confirmar)')
+      await msg(FONES.comerciante, '1'); await sleep(1500)
+
+      const { data: cotFinal } = await supabase.from('cotacoes').select('status, modo_fechamento').eq('id', cot.id).single()
+      const { data: pedidos } = await supabase.from('pedidos').select('*, pedido_itens(*)').eq('cotacao_id', cot.id)
+
+      const pedRep1 = pedidos?.find(p => p.representante_id === rep1.id)
+      const pedRep2 = pedidos?.find(p => p.representante_id === rep2.id)
+      const cafeNoRep1  = pedRep1?.pedido_itens?.some(i => i.produto.includes('Café'))
+      const leiteNoRep2 = pedRep2?.pedido_itens?.some(i => i.produto.includes('Leite'))
+      const ok = cotFinal?.status === 'pedido_gerado' && cotFinal?.modo_fechamento === 'split_auto'
+        && pedidos?.length === 2 && cafeNoRep1 && leiteNoRep2
+
+      if (ok) { log.add('OK', `2 pedidos: Café→${rep1.nome}, Leite→${rep2.nome}`); return { sucesso: true, dados: { cotFinal, pedidos } } }
+      log.add('ERRO', `status=${cotFinal?.status} modo=${cotFinal?.modo_fechamento} pedidos=${pedidos?.length} cafeRep1=${cafeNoRep1} leiteRep2=${leiteNoRep2}`)
+      return { sucesso: false, dados: { cotFinal, pedidos } }
+    },
+  },
+
+  // ── 6. Fechamento: fornecedor único (melhor no geral) ─────────────
+  fechamento_fornecedor_unico: {
+    descricao: 'Comerciante fecha tudo com um único fornecedor (opção 2)',
+    esperado: 'Um único pedido com os 2 itens, modo_fechamento=fornecedor_unico',
+    passos: async (log) => {
+      await limparDadosTeste()
+      const { cot } = await seedFechamento()
+      log.add('SEED', `cotação #${cot.id.slice(-6)} em aguardando_modo_fechamento`)
+
+      log.add('MSG', '[comerciante] "2" (fornecedor único)')
+      await msg(FONES.comerciante, '2'); await sleep(1000)
+      log.add('MSG', '[comerciante] "1" (confirmar)')
+      await msg(FONES.comerciante, '1'); await sleep(1500)
+
+      const { data: cotFinal } = await supabase.from('cotacoes').select('status, modo_fechamento').eq('id', cot.id).single()
+      const { data: pedidos } = await supabase.from('pedidos').select('*, pedido_itens(*)').eq('cotacao_id', cot.id)
+
+      const umPedido = pedidos?.length === 1
+      const doisItens = pedidos?.[0]?.pedido_itens?.length === 2
+      const ok = cotFinal?.status === 'pedido_gerado' && cotFinal?.modo_fechamento === 'fornecedor_unico' && umPedido && doisItens
+
+      if (ok) { log.add('OK', `1 pedido com 2 itens · total R$ ${pedidos[0].valor_total}`); return { sucesso: true, dados: { cotFinal, pedidos } } }
+      log.add('ERRO', `status=${cotFinal?.status} modo=${cotFinal?.modo_fechamento} pedidos=${pedidos?.length} itens=${pedidos?.[0]?.pedido_itens?.length}`)
+      return { sucesso: false, dados: { cotFinal, pedidos } }
+    },
+  },
+
+  // ── 7. Fechamento: manual item a item ─────────────────────────────
+  fechamento_item_a_item: {
+    descricao: 'Comerciante escolhe o fornecedor de cada item (opção 4)',
+    esperado: 'Pedidos por fornecedor conforme escolhas, modo_fechamento=manual',
+    passos: async (log) => {
+      await limparDadosTeste()
+      const { rep1, rep2, cot } = await seedFechamento()
+      log.add('SEED', `cotação #${cot.id.slice(-6)} em aguardando_modo_fechamento`)
+
+      log.add('MSG', '[comerciante] "4" (item a item)')
+      await msg(FONES.comerciante, '4'); await sleep(1000)
+      log.add('MSG', '[comerciante] "1" (Café → Eduardo, mais barato)')
+      await msg(FONES.comerciante, '1'); await sleep(900)   // Café: oferta[0]=rep1 (R$10)
+      log.add('MSG', '[comerciante] "1" (Leite → Maria, mais barato)')
+      await msg(FONES.comerciante, '1'); await sleep(900)   // Leite: oferta[0]=rep2 (R$4) → resumo
+      log.add('MSG', '[comerciante] "1" (confirmar)')
+      await msg(FONES.comerciante, '1'); await sleep(1500)
+
+      const { data: cotFinal } = await supabase.from('cotacoes').select('status, modo_fechamento').eq('id', cot.id).single()
+      const { data: pedidos } = await supabase.from('pedidos').select('*, pedido_itens(*)').eq('cotacao_id', cot.id)
+
+      const pedRep1 = pedidos?.find(p => p.representante_id === rep1.id)
+      const pedRep2 = pedidos?.find(p => p.representante_id === rep2.id)
+      const cafeNoRep1  = pedRep1?.pedido_itens?.some(i => i.produto.includes('Café'))
+      const leiteNoRep2 = pedRep2?.pedido_itens?.some(i => i.produto.includes('Leite'))
+      const ok = cotFinal?.status === 'pedido_gerado' && cotFinal?.modo_fechamento === 'manual'
+        && pedidos?.length === 2 && cafeNoRep1 && leiteNoRep2
+
+      if (ok) { log.add('OK', `2 pedidos conforme escolhas (Café→${rep1.nome}, Leite→${rep2.nome})`); return { sucesso: true, dados: { cotFinal, pedidos } } }
+      log.add('ERRO', `status=${cotFinal?.status} modo=${cotFinal?.modo_fechamento} pedidos=${pedidos?.length} cafeRep1=${cafeNoRep1} leiteRep2=${leiteNoRep2}`)
+      return { sucesso: false, dados: { cotFinal, pedidos } }
     },
   },
 

@@ -171,3 +171,118 @@ Regras:
 function normalizarNome(nome) {
   return (nome ?? '').toLowerCase().trim().replace(/\s+/g, ' ')
 }
+
+// ── Entregável: escolha de fechamento pelo comerciante ────────────────
+// As funções abaixo são puras (sem IA, sem banco) e alimentam o fluxo de
+// fechamento em webhook.js. Cada cotacao_item recebe as ofertas dos reps
+// ordenadas por preço; o índice 0 (mais barato) é marcado como melhor (⭐).
+
+/**
+ * Para cada item esperado, lista as ofertas dos representantes ordenadas
+ * por preço unitário crescente. Marca a primeira (mais barata) como melhor.
+ *
+ * Retorna: [{ item, ofertas: [{ representante_id, nome, empresa, telefone,
+ *   marca, preco_unitario, preco_total, prazo_pagamento_dias,
+ *   prazo_entrega_dias, melhor }] }]
+ */
+export function compararPorItem(itensEsperados, propostas) {
+  return itensEsperados.map(item => {
+    const key = normalizarNome(item.produto)
+    const qtd = item.quantidade ?? 1
+    const ofertas = propostas
+      .filter(p => normalizarNome(p.produto) === key && p.preco_unitario != null)
+      .map(p => ({
+        representante_id:     p.representante_id,
+        nome:                 p.representantes?.nome ?? p.representante_id,
+        empresa:              p.representantes?.empresa ?? '',
+        telefone:             p.representantes?.telefone,
+        marca:                p.marca ?? null,
+        preco_unitario:       p.preco_unitario,
+        preco_total:          p.preco_total ?? p.preco_unitario * qtd,
+        prazo_pagamento_dias: p.prazo_pagamento_dias,
+        prazo_entrega_dias:   p.prazo_entrega_dias,
+      }))
+      .sort((a, b) => a.preco_unitario - b.preco_unitario)
+    ofertas.forEach((o, i) => { o.melhor = i === 0 })
+    return { item, ofertas }
+  })
+}
+
+// Agrupa seleções (uma oferta por item) por representante, montando os
+// grupos que viram pedidos. Itens sem oferta vão para itensSemProposta.
+function agruparSelecoes(selecoes) {
+  const porRep = {}
+  const itensSemProposta = []
+  for (const { item, oferta } of selecoes) {
+    if (!oferta) { itensSemProposta.push(item.produto); continue }
+    if (!porRep[oferta.representante_id]) {
+      porRep[oferta.representante_id] = {
+        rep: {
+          id:                   oferta.representante_id,
+          nome:                 oferta.nome,
+          empresa:              oferta.empresa,
+          telefone:             oferta.telefone,
+          prazo_pagamento_dias: oferta.prazo_pagamento_dias,
+          prazo_entrega_dias:   oferta.prazo_entrega_dias,
+        },
+        itens:    [],
+        subtotal: 0,
+      }
+    }
+    const grupo = porRep[oferta.representante_id]
+    const qtd        = item.quantidade ?? 1
+    const precoTotal = oferta.preco_total ?? oferta.preco_unitario * qtd
+    grupo.itens.push({
+      cotacao_item_id: item.id,
+      produto:         item.produto,
+      marca:           item.marca ?? oferta.marca ?? null,
+      quantidade:      qtd,
+      preco_unitario:  oferta.preco_unitario,
+      preco_total:     precoTotal,
+    })
+    grupo.subtotal += precoTotal
+  }
+  const grupos = Object.values(porRep)
+  return {
+    grupos,
+    valorTotal:       grupos.reduce((s, g) => s + g.subtotal, 0),
+    itensSemProposta,
+  }
+}
+
+/**
+ * Split automático: para cada item, escolhe o fornecedor mais barato.
+ * Pode resultar em vários pedidos (um por representante).
+ */
+export function montarPedidoOtimizado(itensEsperados, propostas) {
+  const selecoes = compararPorItem(itensEsperados, propostas)
+    .map(({ item, ofertas }) => ({ item, oferta: ofertas[0] ?? null }))
+  return agruparSelecoes(selecoes)
+}
+
+/**
+ * Fornecedor único: fecha todos os itens que o representante indicado cobre.
+ * Itens não cobertos por ele entram em itensSemProposta.
+ */
+export function montarPedidoFornecedorUnico(itensEsperados, propostas, representanteId) {
+  const selecoes = compararPorItem(itensEsperados, propostas)
+    .map(({ item, ofertas }) => ({
+      item,
+      oferta: ofertas.find(o => o.representante_id === representanteId) ?? null,
+    }))
+  return agruparSelecoes(selecoes)
+}
+
+/**
+ * Manual item a item: usa o mapa { cotacao_item_id: representante_id } com
+ * as escolhas do comerciante. Itens sem escolha (ou escolha inválida) caem
+ * para itensSemProposta.
+ */
+export function montarPedidoManual(itensEsperados, propostas, escolhasPorItemId = {}) {
+  const selecoes = compararPorItem(itensEsperados, propostas)
+    .map(({ item, ofertas }) => {
+      const repId = escolhasPorItemId[item.id]
+      return { item, oferta: ofertas.find(o => o.representante_id === repId) ?? null }
+    })
+  return agruparSelecoes(selecoes)
+}

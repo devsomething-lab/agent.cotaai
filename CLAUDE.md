@@ -19,7 +19,17 @@ npm test onboarding   # run only scenarios whose name includes "onboarding"
 npm test -- --no-ai   # skip the AI failure-analysis step
 ```
 
-There is **no build step** for the backend. `npm run db:migrate` is declared but `src/db/migrate.js` does not exist — the schema is applied by hand in the Supabase SQL Editor (`src/db/schema.sql`, then `src/db/migration_prazo_entrega.sql`).
+There is **no build step** for the backend. `npm run db:migrate` is declared but `src/db/migrate.js` does not exist — the schema is applied by hand in the Supabase SQL Editor (`src/db/schema.sql`, then the `src/db/migration_*.sql` files).
+
+### Applying DDL programmatically (`exec_migration` RPC)
+The Supabase project exposes an `exec_migration(sql text)` RPC created with `SECURITY DEFINER`, so DDL can be applied without the dashboard:
+```bash
+curl -X POST "$SUPABASE_URL/rest/v1/rpc/exec_migration" \
+  -H "apikey: $SUPABASE_SERVICE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "ALTER TABLE cotacoes ADD COLUMN IF NOT EXISTS ..."}'   # 204 = ok
+```
+**⚠️ Security:** `SECURITY DEFINER` means this runs arbitrary SQL as the table owner, reachable by anyone holding the service key. It is effectively a full DB bypass — keep the service key secret, never expose this RPC to the anon role, and consider dropping it once migrations are settled. Prefer idempotent `IF NOT EXISTS` statements and keep a matching `src/db/migration_*.sql` file checked in for every change applied through it.
 
 ### Testing notes
 - `test/runner.mjs` is a custom integration harness, not a unit-test framework. It POSTs fake Meta webhook payloads to a **running** local server and asserts against real Supabase state, then optionally asks Claude to diagnose failures.
