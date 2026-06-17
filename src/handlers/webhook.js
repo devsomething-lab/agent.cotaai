@@ -118,9 +118,11 @@ export async function handleWebhook(payload) {
   console.log(`[webhook] ${phone} | tipo: ${type} | "${(message ?? '').slice(0, 60)}"`)
 
   // 1. Verifica se está em processo de auto-cadastro
+  // null = onboarding concluiu e a mensagem deve continuar no fluxo de cotação
   const sessaoAtiva = await getSessaoOnboarding(phone)
   if (sessaoAtiva) {
-    return handleAutocadastro(phone, message)
+    const resultado = await handleAutocadastro(phone, message)
+    if (resultado !== null) return resultado
   }
 
   // 2. Resposta ao template de convite — SEMPRE verifica convite pendente primeiro
@@ -1607,15 +1609,19 @@ async function finalizarPedidos({ comerciante, cotacao, resultado, modo, phone }
 
     criados.push({ pedido, grupo })
 
-    // Notifica o representante
+    // Notifica o representante (falha não cancela o pedido)
     const resumoRep = grupo.itens.map(it => `• ${it.produto} ×${it.quantidade ?? 1} — R$ ${it.preco_total?.toFixed(2)}`).join('\n')
-    await sendText(grupo.rep.telefone, [
-      `*Pedido #${pedido.id.slice(-6).toUpperCase()} recebido!*`, '',
-      `Cliente: ${comerciante.nome} (${comerciante.telefone})`, '',
-      resumoRep, '',
-      `*Total: R$ ${grupo.subtotal.toFixed(2)}*`,
-      `Pagamento: ${grupo.rep.prazo_pagamento_dias ?? '?'}d | Entrega: ${grupo.rep.prazo_entrega_dias ?? '?'}d`,
-    ].join('\n'))
+    try {
+      await sendText(grupo.rep.telefone, [
+        `*Pedido #${pedido.id.slice(-6).toUpperCase()} recebido!*`, '',
+        `Cliente: ${comerciante.nome} (${comerciante.telefone})`, '',
+        resumoRep, '',
+        `*Total: R$ ${grupo.subtotal.toFixed(2)}*`,
+        `Pagamento: ${grupo.rep.prazo_pagamento_dias ?? '?'}d | Entrega: ${grupo.rep.prazo_entrega_dias ?? '?'}d`,
+      ].join('\n'))
+    } catch (err) {
+      console.warn(`[finalizarPedidos] falha ao notificar rep ${grupo.rep.id}:`, err.message)
+    }
   }
 
   await supabase.from('cotacoes')
@@ -1635,13 +1641,17 @@ async function finalizarPedidos({ comerciante, cotacao, resultado, modo, phone }
     linhas.push('')
   }
 
-  await sendText(phone, [
-    criados.length > 1 ? `*${criados.length} pedidos gerados (split):*` : '*Pedido confirmado!*',
-    '',
-    ...linhas,
-    `*Total geral: R$ ${resultado.valorTotal.toFixed(2)}*`,
-    criados.length > 1 ? `${criados.length} fornecedores foram notificados.` : 'O fornecedor foi notificado.',
-  ].join('\n'))
+  try {
+    await sendText(phone, [
+      criados.length > 1 ? `*${criados.length} pedidos gerados (split):*` : '*Pedido confirmado!*',
+      '',
+      ...linhas,
+      `*Total geral: R$ ${resultado.valorTotal.toFixed(2)}*`,
+      criados.length > 1 ? `${criados.length} fornecedores foram notificados.` : 'O fornecedor foi notificado.',
+    ].join('\n'))
+  } catch (err) {
+    console.warn('[finalizarPedidos] falha ao notificar comerciante:', err.message)
+  }
 
   return { ok: true, pedidos: criados.map(c => c.pedido.id), modo }
 }

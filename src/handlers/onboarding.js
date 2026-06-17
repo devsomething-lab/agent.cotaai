@@ -386,8 +386,7 @@ async function processarEtapaComerciantge(telefone, sessao, message) {
       // Busca dados atualizados da sessão para salvar no banco
       const { data: s2 } = await supabase.from('onboarding_sessoes').select('*').eq('telefone', telefone).single()
       const { data: comerciante } = await supabase.from('comerciantes')
-        .update({ nome: s2.nome, empresa: s2.empresa, cnpj: cnpjFinal })
-        .eq('telefone', telefone)
+        .upsert({ telefone, nome: s2.nome, empresa: s2.empresa, cnpj: cnpjFinal }, { onConflict: 'telefone' })
         .select()
         .single()
 
