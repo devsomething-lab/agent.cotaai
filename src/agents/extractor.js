@@ -320,6 +320,43 @@ Formato:
   }
 }
 
+// ── Classificação de itens em setores ────────────────────────────────
+// Retorna um array paralelo a `itens` com o setor de cada um.
+
+export async function classificarSetores(itens) {
+  if (!itens?.length) return []
+  const lista = itens.map((it, i) =>
+    `${i}. ${it.produto}${it.marca ? ` (${it.marca})` : ''}`
+  ).join('\n')
+
+  const SETORES = [
+    'Mercearia Seca', 'Laticínios', 'Bebidas', 'Snacks e Confeitaria',
+    'Higiene Pessoal', 'Limpeza', 'Frios e Embutidos', 'Conservas', 'Outros',
+  ]
+
+  try {
+    const response = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 300,
+      system: `Classifique cada produto em um setor de supermercado brasileiro.
+Setores disponíveis: ${SETORES.join(', ')}.
+Responda SOMENTE com JSON: { "setores": ["Setor A", "Setor B", ...] }
+O array deve ter o mesmo tamanho que a lista de entrada, na mesma ordem.`,
+      messages: [{ role: 'user', content: lista }],
+    })
+
+    const raw = response.content[0].text.trim()
+    const match = raw.match(/\{[\s\S]*\}/)
+    if (!match) throw new Error('JSON não encontrado')
+    const parsed = JSON.parse(match[0])
+    const setores = parsed.setores ?? []
+    return itens.map((_, i) => setores[i] ?? 'Outros')
+  } catch (err) {
+    console.warn('[classificarSetores] erro, usando "Outros":', err.message)
+    return itens.map(() => 'Outros')
+  }
+}
+
 // ── Transcrição de áudio ─────────────────────────────────────────────
 
 export async function transcreverAudio(audioUrl, mimeType = 'audio/ogg') {

@@ -115,11 +115,33 @@ export async function downloadMedia(mediaId) {
 // ── Templates formatados ─────────────────────────────────────────────
 
 export function templateCotacaoParaRep(itens, cotacaoId) {
-  const linhas = itens.map((it, i) => {
-    const marca   = it.marca   ? ` (${it.marca})`   : ''
-    const unidade = it.unidade ? ` · ${it.unidade}` : ''
-    return `${i + 1}. ${it.produto}${marca}${unidade} · ${it.quantidade ?? 1}un`
-  }).join('\n')
+  const temSetores = itens.some(it => it.setor && it.setor !== 'Outros')
+
+  let linhas
+  if (temSetores) {
+    // Agrupa por setor mantendo numeração sequencial global
+    const porSetor = {}
+    for (const it of itens) {
+      const s = it.setor ?? 'Outros'
+      if (!porSetor[s]) porSetor[s] = []
+      porSetor[s].push(it)
+    }
+    let num = 1
+    linhas = Object.entries(porSetor).map(([setor, grupo]) => {
+      const items = grupo.map(it => {
+        const marca   = it.marca   ? ` (${it.marca})`   : ''
+        const unidade = it.unidade ? ` · ${it.unidade}` : ''
+        return `${num++}. ${it.produto}${marca}${unidade} · ${it.quantidade ?? 1}un`
+      })
+      return [`*${setor}*`, ...items].join('\n')
+    }).join('\n\n')
+  } else {
+    linhas = itens.map((it, i) => {
+      const marca   = it.marca   ? ` (${it.marca})`   : ''
+      const unidade = it.unidade ? ` · ${it.unidade}` : ''
+      return `${i + 1}. ${it.produto}${marca}${unidade} · ${it.quantidade ?? 1}un`
+    }).join('\n')
+  }
 
   return [
     `*Kota · Cotação #${cotacaoId.slice(-6).toUpperCase()}*`,

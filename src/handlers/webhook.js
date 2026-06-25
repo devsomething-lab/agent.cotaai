@@ -1,7 +1,7 @@
 import { supabase, findOrCreateComercianteByTelefone, findRepresentanteByTelefone,
          getCotacaoComItens, getPropostasDaCotacao, getCotacaoPendentePorTelefone,
          getAllRepresentantesAtivos } from '../db/client.js'
-import { extrairListaProdutos, estruturarRespostaRep, transcreverAudio } from '../agents/extractor.js'
+import { extrairListaProdutos, estruturarRespostaRep, transcreverAudio, classificarSetores } from '../agents/extractor.js'
 import { extrairCatalogo, classificarMensagemRep } from '../agents/catalogo_agent.js'
 import { consolidarPropostas, gerarResumoNegociacao, compararPorItem,
          montarPedidoOtimizado, montarPedidoFornecedorUnico, montarPedidoManual } from '../agents/consolidator.js'
@@ -349,10 +349,21 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
 
   if (cotacaoConfirmando && message) {
     if (cmd === '1' || cmd === 'sim' || cmd === 'seguir' || cmd === 'confirmar') {
-      // Confirma — dispara cotação
+      // Confirma — classifica setores e dispara cotação
       await supabase.from('cotacoes')
         .update({ obs_interna: null })
         .eq('id', cotacaoConfirmando.id)
+
+      const itensDaCotacao = cotacaoConfirmando.cotacao_itens ?? []
+      try {
+        const setores = await classificarSetores(itensDaCotacao)
+        await Promise.all(itensDaCotacao.map((it, i) =>
+          supabase.from('cotacao_itens').update({ setor: setores[i] }).eq('id', it.id)
+        ))
+      } catch (err) {
+        console.warn('[webhook] erro ao classificar setores:', err.message)
+      }
+
       await sendText(phone, 'Verificando catálogos dos representantes...')
       await dispararCotacao(cotacaoConfirmando, comerciante)
       return { ok: true }
