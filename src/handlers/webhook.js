@@ -495,7 +495,7 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
   }
 
   // ── Nova lista com cotação pendente ──────────────────────────────
-  const { data: cotacaoPendente } = await supabase
+  let { data: cotacaoPendente } = await supabase
     .from('cotacoes')
     .select('*')
     .eq('comerciante_id', comerciante.id)
@@ -503,6 +503,34 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
     .order('criado_em', { ascending: false })
     .limit(1)
     .single()
+
+  // ── Resposta ao aviso "1 = ver / 2 = nova cotação" ───────────────
+  if (cotacaoPendente?.obs_interna?.startsWith('pendente_msg:')) {
+    const listaSalva = cotacaoPendente.obs_interna.slice('pendente_msg:'.length)
+
+    if (cmd === '1') {
+      await supabase.from('cotacoes').update({ obs_interna: null }).eq('id', cotacaoPendente.id)
+      return handleVerCotacaoAtual(comerciante, phone)
+    }
+
+    // cmd === '2' ou o usuário enviou uma nova lista diretamente
+    await supabase.from('cotacoes')
+      .update({ status: 'cancelada', obs_interna: null, fechado_em: new Date().toISOString() })
+      .eq('id', cotacaoPendente.id)
+    cotacaoPendente = null
+
+    if (cmd !== '2' && (message?.length > 10 || mediaId)) {
+      // Nova lista enviada diretamente — cai para extração abaixo
+    } else {
+      // Resposta "2" — reprocessa a lista salva automaticamente
+      const eraMidia = listaSalva.startsWith('[') && listaSalva.endsWith(']')
+      if (eraMidia) {
+        await sendText(phone, 'Cotação anterior cancelada! Reenvie sua lista de produtos. 📋')
+        return { ok: true }
+      }
+      return handleMensagemComerciantge({ phone, message: listaSalva, type: 'texto', mediaId: null, mimeType: null })
+    }
+  }
 
   if (cotacaoPendente && (message?.length > 10 || mediaId)) {
     const statusLabel = cotacaoPendente.status === 'aguardando_respostas' ? 'aguardando respostas' :
@@ -514,13 +542,8 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
       '1. Ver cotação em aberto',
       '2. Iniciar nova cotação',
     ].join('\n'))
-    // Salva intenção de nova cotação temporariamente
-    await supabase.from('comerciantes').update({ 
-      nome: comerciante.nome // trigger para salvar pending_message
-    }).eq('id', comerciante.id)
-    // Armazena mensagem pendente no banco
-    await supabase.from('cotacoes').update({ 
-      obs_interna: message ?? `[${type}]`
+    await supabase.from('cotacoes').update({
+      obs_interna: `pendente_msg:${message ?? `[${type}]`}`
     }).eq('id', cotacaoPendente.id).is('obs_interna', null)
     return { ok: true }
   }
