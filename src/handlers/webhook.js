@@ -213,11 +213,18 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
   const isGenerica = palavrasGenericas.some(p => msgLower === p || msgLower.startsWith(p + ' '))
 
   if (msgCurta && isGenerica && type === 'texto') {
+    const comerGreet = await findOrCreateComercianteByTelefone(phone)
+    const primeiroNome = (comerGreet?.nome ?? '').split(' ')[0]
     await sendText(phone, [
-      '*Kota*',
+      primeiroNome ? `Olá, *${primeiroNome}*!` : 'Olá!',
       '',
-      'Envie sua lista para cotar produtos.',
-      'Representante? Envie *CADASTRO*.',
+      'Envie sua lista de produtos para iniciar uma cotação.',
+      '',
+      'Exemplo:',
+      '_2cx Coca-Cola 2L_',
+      '_10fd Arroz Urbano 5kg_',
+      '',
+      'Outros comandos: *minha cotação* · *meus fornecedores* · *histórico*',
     ].join('\n'))
     return { ok: true }
   }
@@ -376,11 +383,29 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
       await sendText(phone, 'Tudo bem! Pode me enviar a lista corrigida quando quiser.')
       return { ok: true }
     }
-    // Resposta não reconhecida — repete a pergunta
+    // Mensagem parece uma nova lista — cancela pendente e processa a nova
+    const pareceNovaLista = (message ?? '').length > 25 || (message ?? '').includes('\n')
+    if (pareceNovaLista) {
+      await supabase.from('cotacoes')
+        .update({ status: 'cancelada', obs_interna: null, fechado_em: new Date().toISOString() })
+        .eq('id', cotacaoConfirmando.id)
+      return handleMensagemComerciantge({ phone, message, type, mediaId, mimeType })
+    }
+
+    // Resposta curta não reconhecida — mostra itens pendentes e repete pergunta
+    const itensPendentes = cotacaoConfirmando.cotacao_itens ?? []
+    const linhasPendentes = itensPendentes.map((it, i) => {
+      const marca = it.marca ? ` (${it.marca})` : ''
+      const un = it.unidade ? ` – ${it.unidade}` : ''
+      return `${i + 1}. ${it.produto}${marca}${un} × ${it.quantidade ?? 1}`
+    })
     await sendText(phone, [
-      'Responda com:',
-      '1. Seguir com essa lista',
-      '2. Cancelar e enviar uma nova lista',
+      `*Sua lista — ${itensPendentes.length} produto(s):*`,
+      '',
+      ...linhasPendentes,
+      '',
+      '1. Confirmar e cotar',
+      '2. Cancelar e enviar nova lista',
     ].join('\n'))
     return { ok: true }
   }
