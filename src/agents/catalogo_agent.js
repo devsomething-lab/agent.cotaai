@@ -6,6 +6,12 @@ import 'dotenv/config'
 
 const client = new Anthropic()
 
+// Data no passado ao cadastrar = quase sempre data de exemplo ou erro de digitação
+function validarDataFutura(data) {
+  if (!data) return null
+  return data >= new Date().toISOString().slice(0, 10) ? data : null
+}
+
 // ── Prompts por tipo de documento ─────────────────────────────────────
 // Feature 2: prompts especializados por mídia para maximizar recall
 
@@ -161,7 +167,7 @@ export async function extrairCatalogo(mensagem) {
         ...it,
         prazo_pagamento_dias: it.prazo_pagamento_dias ?? parsed.prazo_pagamento_geral,
         prazo_entrega_dias:   it.prazo_entrega_dias   ?? parsed.prazo_entrega_geral,
-        valido_ate:           it.valido_ate            ?? parsed.validade_geral,
+        valido_ate:           validarDataFutura(it.valido_ate ?? parsed.validade_geral),
       }))
     }
 
@@ -248,7 +254,7 @@ RETORNE APENAS JSON:
     .filter(l => l[mapa.produto] != null)
     .map(l => {
       const temData = mapa.valido_ate && l[mapa.valido_ate] != null
-      const valido_ate = temData ? datasNormalizadas[dataIndex++] : null
+      const valido_ate = validarDataFutura(temData ? datasNormalizadas[dataIndex++] : null)
       return {
         produto:              String(l[mapa.produto] ?? '').trim(),
         marca:                mapa.marca             ? limparString(l[mapa.marca])   : null,
