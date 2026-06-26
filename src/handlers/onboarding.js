@@ -173,6 +173,15 @@ async function processarEtapaRep(telefone, sessao, message) {
         await sendText(telefone, 'CNPJ inválido. Informe os 14 dígitos corretamente.\n\nEx: _12.345.678/0001-90_')
         return { ok: true }
       }
+      const situacao = await consultarCNPJ(cnpjFinal)
+      if (situacao === 'inativo') {
+        await sendText(telefone, [
+          `O CNPJ *${formatarCNPJ(cnpjFinal)}* não foi encontrado ou está inativo na Receita Federal.`,
+          '',
+          'Verifique o número e tente novamente, ou envie um CNPJ diferente.',
+        ].join('\n'))
+        return { ok: true }
+      }
       await supabase.from('onboarding_sessoes')
         .update({ cnpj: cnpjFinal, etapa: 'aguardando_prazo_entrega', atualizado_em: new Date().toISOString() })
         .eq('telefone', telefone)
@@ -379,6 +388,15 @@ async function processarEtapaComerciantge(telefone, sessao, message) {
         await sendText(telefone, 'CNPJ inválido. Informe os 14 dígitos corretamente.\n\nEx: _12.345.678/0001-90_')
         return { ok: true }
       }
+      const situacaoCom = await consultarCNPJ(cnpjFinal)
+      if (situacaoCom === 'inativo') {
+        await sendText(telefone, [
+          `O CNPJ *${formatarCNPJ(cnpjFinal)}* não foi encontrado ou está inativo na Receita Federal.`,
+          '',
+          'Verifique o número e tente novamente, ou envie um CNPJ diferente.',
+        ].join('\n'))
+        return { ok: true }
+      }
       await supabase.from('onboarding_sessoes')
         .update({ cnpj: cnpjFinal, etapa: 'cadastrando_fornecedores', atualizado_em: new Date().toISOString() })
         .eq('telefone', telefone)
@@ -561,6 +579,28 @@ function extrairTelefones(texto) {
 }
 
 // ── Helpers de CNPJ ───────────────────────────────────────────────────
+
+// Consulta BrasilAPI para verificar se o CNPJ existe e está ativo.
+// Retorna: 'ativo' | 'inativo' | 'indisponivel'
+async function consultarCNPJ(cnpj) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 5000)
+  try {
+    const res = await fetch(`https://brasilapi.com.br/api/cnpj/v1/${cnpj}`, {
+      signal: controller.signal,
+    })
+    clearTimeout(timer)
+    if (res.status === 404) return 'inativo'
+    if (!res.ok) return 'indisponivel'
+    const data = await res.json()
+    // situacao_cadastral 2 = ATIVA
+    return data.situacao_cadastral === 2 ? 'ativo' : 'inativo'
+  } catch (err) {
+    clearTimeout(timer)
+    console.warn('[consultarCNPJ] indisponivel:', err.message)
+    return 'indisponivel'
+  }
+}
 
 function normalizarCNPJ(valor) {
   const digits = (valor ?? '').replace(/\D/g, '')
