@@ -22,6 +22,7 @@ process.env.SIM_MODE = process.env.SIM_MODE ?? 'true'
 import { scenarios as onboardingScenarios }    from './scenarios/onboarding.mjs'
 import { scenarios as extracaoScenarios }      from './scenarios/extracao_catalogo.mjs'
 import { scenarios as intencaoScenarios }      from './scenarios/intencao_edge.mjs'
+import { scenarios as complementaresScenarios } from './scenarios/complementares.mjs'
 
 // ── Importa handler principal ─────────────────────────────────────────
 import { handleWebhook } from '../src/handlers/webhook.js'
@@ -30,6 +31,7 @@ const ALL_SCENARIOS = [
   ...onboardingScenarios,
   ...extracaoScenarios,
   ...intencaoScenarios,
+  ...complementaresScenarios,
 ]
 
 // ── Argumentos CLI ────────────────────────────────────────────────────
