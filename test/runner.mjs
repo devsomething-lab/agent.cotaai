@@ -153,8 +153,8 @@ const CENARIOS = {
       log.add('MSG', `[comerciante] "Mercado Teste"`)
       await msg(FONES.comerciante, 'Mercado Teste'); await sleep(800)
 
-      log.add('MSG', `[comerciante] "11.222.333/0001-81"`)
-      await msg(FONES.comerciante, '11.222.333/0001-81'); await sleep(800)
+      log.add('MSG', `[comerciante] "60.500.882/0001-86"`)
+      await msg(FONES.comerciante, '60.500.882/0001-86'); await sleep(800)
 
       log.add('MSG', `[comerciante] "1" (confirmar)`)
       await msg(FONES.comerciante, '1'); await sleep(2000)
@@ -200,8 +200,8 @@ const CENARIOS = {
       log.add('MSG', `[representante] "Distribuidora Teste"`)
       await msg(FONES.representante, 'Distribuidora Teste'); await sleep(800)
 
-      log.add('MSG', `[representante] "11.222.333/0001-81"`)
-      await msg(FONES.representante, '11.222.333/0001-81'); await sleep(800)
+      log.add('MSG', `[representante] "60.500.882/0001-86"`)
+      await msg(FONES.representante, '60.500.882/0001-86'); await sleep(800)
 
       log.add('MSG', `[representante] "5" (prazo entrega)`)
       await msg(FONES.representante, '5'); await sleep(800)
