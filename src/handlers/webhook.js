@@ -384,7 +384,7 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
       return { ok: true }
     }
     // Mensagem parece uma nova lista — cancela pendente e processa a nova
-    const pareceNovaLista = (message ?? '').length > 25 || (message ?? '').includes('\n')
+    const pareceNovaLista = (message ?? '').length > 15 || (message ?? '').includes('\n')
     if (pareceNovaLista) {
       await supabase.from('cotacoes')
         .update({ status: 'cancelada', obs_interna: null, fechado_em: new Date().toISOString() })
@@ -1091,29 +1091,37 @@ async function verificarEConsolidar(cotacaoId) {
 }
 
 export async function consolidarEEnviar(cotacaoId) {
-  const { cotacao, itens } = await getCotacaoComItens(cotacaoId)
-  const propostas = await getPropostasDaCotacao(cotacaoId)
-
-  if (!propostas.length) {
-    await sendText(cotacao.comerciantes.telefone, 'Nenhum fornecedor respondeu. Tente novamente mais tarde.')
+  if (!lockCotacao(cotacaoId)) {
+    console.log(`[consolidarEEnviar] cotação ${cotacaoId} já em processamento — ignorando`)
     return
   }
+  try {
+    const { cotacao, itens } = await getCotacaoComItens(cotacaoId)
+    const propostas = await getPropostasDaCotacao(cotacaoId)
 
-  const consolidado = consolidarPropostas(itens, propostas)
+    if (!propostas.length) {
+      await sendText(cotacao.comerciantes.telefone, 'Nenhum fornecedor respondeu. Tente novamente mais tarde.')
+      return
+    }
 
-  for (const rep of consolidado.rankingFornecedores) {
-    await supabase.from('propostas').update({ score: rep.score })
-      .eq('cotacao_id', cotacaoId).eq('representante_id', rep.id)
+    const consolidado = consolidarPropostas(itens, propostas)
+
+    for (const rep of consolidado.rankingFornecedores) {
+      await supabase.from('propostas').update({ score: rep.score })
+        .eq('cotacao_id', cotacaoId).eq('representante_id', rep.id)
+    }
+
+    await supabase.from('cotacoes').update({ status: 'aguardando_modo_fechamento', obs_interna: null }).eq('id', cotacaoId)
+
+    // Feature 3: gera resumo em linguagem natural com trade-offs
+    const resumo = await gerarResumoNegociacao(consolidado)
+
+    const comparacao = compararPorItem(itens, propostas)
+    const msgComparativo = templateComparativoPorItem(comparacao, cotacaoId, resumo)
+    await sendText(cotacao.comerciantes.telefone, msgComparativo)
+  } finally {
+    unlockCotacao(cotacaoId)
   }
-
-  await supabase.from('cotacoes').update({ status: 'aguardando_modo_fechamento', obs_interna: null }).eq('id', cotacaoId)
-
-  // Feature 3: gera resumo em linguagem natural com trade-offs
-  const resumo = await gerarResumoNegociacao(consolidado)
-
-  const comparacao = compararPorItem(itens, propostas)
-  const msgComparativo = templateComparativoPorItem(comparacao, cotacaoId, resumo)
-  await sendText(cotacao.comerciantes.telefone, msgComparativo)
 }
 
 // ── Escolha do fornecedor → Pedido ────────────────────────────────────

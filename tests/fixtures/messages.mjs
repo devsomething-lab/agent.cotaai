@@ -47,7 +47,7 @@ export const PHONES = {
 
 // CNPJs para teste
 export const CNPJS = {
-  valido_ativo:   '11222333000181', // formato válido — substituir por CNPJ real ativo para teste E2E
+  valido_ativo:   '60500882000186', // PM Digital Solutions LTDA — ATIVA na Receita Federal
   formato_invalido: '00000000000000',
   digito_errado:  '11222333000199',
   inativo:        '11222333000200', // CNPJ existente mas baixado

@@ -3,6 +3,7 @@
 
 import { createClient } from '@supabase/supabase-js'
 import 'dotenv/config'
+import { simGetMessages, simClearMessages } from '../../src/services/whatsapp.js'
 
 export const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -20,6 +21,9 @@ export async function cleanupPhones(phones) {
 
   const repIds = (reps.data ?? []).map(r => r.id)
   const comIds = (coms.data ?? []).map(c => c.id)
+
+  if (comIds.length) try { await supabase.from('vinculos').delete().in('comerciante_id', comIds) } catch {}
+  if (repIds.length) try { await supabase.from('vinculos').delete().in('representante_id', repIds) } catch {}
 
   if (repIds.length) {
     await supabase.from('catalogo_historico').delete().in('representante_id', repIds)
@@ -45,7 +49,7 @@ export async function cleanupPhones(phones) {
   await supabase.from('onboarding_sessoes').delete().in('telefone', phoneList)
   await supabase.from('representantes').delete().in('telefone', phoneList)
   await supabase.from('comerciantes').delete().in('telefone', phoneList)
-  await supabase.from('convites').delete().in('telefone_rep', phoneList).catch(() => {})
+  try { await supabase.from('convites_pendentes').delete().in('telefone_fornecedor', phoneList) } catch {}
 }
 
 // Cria rep de teste diretamente no banco
@@ -86,6 +90,17 @@ export async function seedCatalogo(repId, itens) {
   }
 }
 
+// Cria vínculo entre comerciante e rep (por telefone)
+export async function seedVinculo(comPhone, repPhone) {
+  const { data: com } = await supabase.from('comerciantes').select('id').eq('telefone', comPhone).single()
+  const { data: rep } = await supabase.from('representantes').select('id').eq('telefone', repPhone).single()
+  if (!com || !rep) throw new Error(`seedVinculo: não encontrou com(${comPhone}) ou rep(${repPhone})`)
+  await supabase.from('vinculos').upsert(
+    { comerciante_id: com.id, representante_id: rep.id, ativo: true },
+    { onConflict: 'comerciante_id,representante_id' }
+  )
+}
+
 // Busca última cotação do comerciante
 export async function getUltimaCotacao(comercianteId) {
   const { data } = await supabase
@@ -100,9 +115,9 @@ export async function getUltimaCotacao(comercianteId) {
 
 // Busca mensagens capturadas em SIM_MODE
 export function getSimMessages() {
-  return global._simMessages ?? []
+  return simGetMessages()
 }
 
 export function clearSimMessages() {
-  global._simMessages = []
+  simClearMessages()
 }

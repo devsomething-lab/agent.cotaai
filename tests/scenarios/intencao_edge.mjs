@@ -2,7 +2,7 @@
 // T24–T52: Fluxo de intenção, modos de fechamento e edge cases
 
 import { makePayload, PHONES } from '../fixtures/messages.mjs'
-import { cleanupPhones, seedRep, seedComerciantge, seedCatalogo, getSimMessages, clearSimMessages, getUltimaCotacao, supabase } from '../fixtures/db.mjs'
+import { cleanupPhones, seedRep, seedComerciantge, seedCatalogo, seedVinculo, getSimMessages, clearSimMessages, getUltimaCotacao, supabase } from '../fixtures/db.mjs'
 
 // Helper: cria cotação com comparativo pronto
 async function setupCotacaoComComparativo(handleWebhook) {
@@ -12,6 +12,7 @@ async function setupCotacaoComComparativo(handleWebhook) {
     { produto: 'Coca-Cola 2L', marca: 'Coca-Cola', unidade: 'caixa', preco: 46.50, prazo_entrega: 2, prazo_pagamento: 30 },
     { produto: 'Leite Ninho 400g', marca: 'Ninho', unidade: 'unidade', preco: 13.80, prazo_entrega: 2, prazo_pagamento: 30 },
   ])
+  await seedVinculo(PHONES.comerciante, PHONES.representante)
   await handleWebhook(makePayload(PHONES.comerciante, 'Coca-Cola\nLeite Ninho'))
   await handleWebhook(makePayload(PHONES.comerciante, '1')) // confirma lista
   clearSimMessages()
@@ -32,6 +33,7 @@ export const scenarios = [
       await cleanupPhones({ c: PHONES.comerciante, r: PHONES.representante })
       await seedComerciantge(PHONES.comerciante)
       await seedRep(PHONES.representante)
+      await seedVinculo(PHONES.comerciante, PHONES.representante)
     },
     run: async (handleWebhook) => {
       await handleWebhook(makePayload(PHONES.comerciante, '1 cx Coca-Cola'))
@@ -44,7 +46,7 @@ export const scenarios = [
       const confirmRep = msgs.find(m => m.to === PHONES.representante)
       if (!confirmRep) throw new Error('Rep não recebeu confirmação da proposta')
       // Comparativo deve ir ao comerciante
-      const comparativo = msgs.find(m => m.to === PHONES.comerciante && m.body.includes('R$'))
+      const comparativo = msgs.find(m => m.to === PHONES.comerciante && m.text.includes('R$'))
       if (!comparativo) throw new Error('Comparativo não enviado ao comerciante após resposta do rep')
       return { ok: true, msg: 'Resposta livre do rep interpretada e comparativo gerado' }
     },
@@ -63,7 +65,7 @@ export const scenarios = [
       clearSimMessages()
       await handleWebhook(makePayload(PHONES.representante, 'Coca R$45 30d'))
       const msgs = getSimMessages()
-      const body = msgs.find(m => m.to === PHONES.representante)?.body ?? ''
+      const body = msgs.find(m => m.to === PHONES.representante)?.text ?? ''
       if (!body) throw new Error('Nenhuma resposta ao rep sem cotação pendente')
       if (body.toLowerCase().includes('erro') && body.toLowerCase().includes('crash')) {
         throw new Error('Sistema crashou com resposta sem cotação pendente')
@@ -119,7 +121,7 @@ export const scenarios = [
       const notifRep = msgs.find(m => m.to === PHONES.representante)
       if (!notifRep) throw new Error('Rep não foi notificado do pedido')
       // Comerciante deve receber confirmação
-      const confirmCom = msgs.find(m => m.to === PHONES.comerciante && m.body.toLowerCase().includes('pedido'))
+      const confirmCom = msgs.find(m => m.to === PHONES.comerciante && m.text.toLowerCase().includes('pedido'))
       if (!confirmCom) throw new Error('Comerciante não recebeu confirmação do pedido')
       // Verifica pedido no banco
       const com = await supabase.from('comerciantes').select('id').eq('telefone', PHONES.comerciante).single()
@@ -139,9 +141,9 @@ export const scenarios = [
       await setupCotacaoComComparativo(handleWebhook)
       await handleWebhook(makePayload(PHONES.comerciante, '1'))
       clearSimMessages()
-      await handleWebhook(makePayload(PHONES.comerciante, '2')) // não, voltar
+      await handleWebhook(makePayload(PHONES.comerciante, '0')) // voltar ao comparativo
       const msgs = getSimMessages()
-      const body = msgs.find(m => m.to === PHONES.comerciante)?.body ?? ''
+      const body = msgs.find(m => m.to === PHONES.comerciante)?.text ?? ''
       // Deve reenviar o comparativo
       if (!body.includes('R$') && !body.toLowerCase().includes('cotação')) {
         throw new Error(`Deveria reenviar comparativo: ${body}`)
@@ -158,8 +160,7 @@ export const scenarios = [
     setup: async () => { await cleanupPhones({ c: PHONES.comerciante, r: PHONES.representante }) },
     run: async (handleWebhook) => {
       const { cotacao } = await setupCotacaoComComparativo(handleWebhook)
-      await handleWebhook(makePayload(PHONES.comerciante, '2'))
-      await handleWebhook(makePayload(PHONES.comerciante, '1')) // confirma
+      await handleWebhook(makePayload(PHONES.comerciante, 'consulta'))
       const { data } = await supabase.from('cotacoes').select('status').eq('id', cotacao.id).single()
       if (data.status !== 'consulta') throw new Error(`Status incorreto: ${data.status}`)
       const com = await supabase.from('comerciantes').select('id').eq('telefone', PHONES.comerciante).single()
@@ -182,7 +183,7 @@ export const scenarios = [
       clearSimMessages()
       await handleWebhook(makePayload(PHONES.comerciante, 'minha cotação'))
       const msgs = getSimMessages()
-      const body = msgs.find(m => m.to === PHONES.comerciante)?.body ?? ''
+      const body = msgs.find(m => m.to === PHONES.comerciante)?.text ?? ''
       if (!body.toLowerCase().includes('cotação') && !body.includes(cotacao.id.slice(-6).toUpperCase())) {
         throw new Error(`Retomada não mostrou cotação correta: ${body}`)
       }
@@ -209,6 +210,8 @@ export const scenarios = [
         { produto: 'Coca-Cola 2L', marca: 'Coca-Cola', unidade: 'caixa', preco: 48.00, prazo_pagamento: 30, prazo_entrega: 1 },
         { produto: 'Leite Ninho 400g', marca: 'Ninho', unidade: 'unidade', preco: 12.00, prazo_pagamento: 30, prazo_entrega: 1 },
       ])
+      await seedVinculo(PHONES.comerciante, PHONES.representante)
+      await seedVinculo(PHONES.comerciante, PHONES.representante2)
     },
     run: async (handleWebhook) => {
       await handleWebhook(makePayload(PHONES.comerciante, 'Coca-Cola\nLeite Ninho'))
@@ -234,6 +237,7 @@ export const scenarios = [
       await cleanupPhones({ c: PHONES.comerciante, r: PHONES.representante })
       await seedComerciantge(PHONES.comerciante)
       await seedRep(PHONES.representante)
+      await seedVinculo(PHONES.comerciante, PHONES.representante)
     },
     run: async (handleWebhook) => {
       await handleWebhook(makePayload(PHONES.comerciante, 'Coca-Cola'))
@@ -255,12 +259,11 @@ export const scenarios = [
     setup: async () => { await cleanupPhones({ c: PHONES.comerciante, r: PHONES.representante }) },
     run: async (handleWebhook) => {
       await setupCotacaoComComparativo(handleWebhook)
-      await handleWebhook(makePayload(PHONES.comerciante, '2'))
-      await handleWebhook(makePayload(PHONES.comerciante, '1'))
+      await handleWebhook(makePayload(PHONES.comerciante, 'consulta'))
       clearSimMessages()
       await handleWebhook(makePayload(PHONES.comerciante, 'comprar'))
       const msgs = getSimMessages()
-      const body = msgs.find(m => m.to === PHONES.comerciante)?.body ?? ''
+      const body = msgs.find(m => m.to === PHONES.comerciante)?.text ?? ''
       if (!body.includes('R$') && !body.toLowerCase().includes('comparativo') && !body.toLowerCase().includes('cotação')) {
         throw new Error(`Comparativo não reenviado ao retomar: ${body}`)
       }
@@ -277,6 +280,7 @@ export const scenarios = [
       await cleanupPhones({ c: PHONES.comerciante, r: PHONES.representante })
       await seedComerciantge(PHONES.comerciante)
       await seedRep(PHONES.representante)
+      await seedVinculo(PHONES.comerciante, PHONES.representante)
     },
     run: async (handleWebhook) => {
       await handleWebhook(makePayload(PHONES.comerciante, 'Coca-Cola'))
@@ -285,7 +289,7 @@ export const scenarios = [
       // Envia nova lista com cotação em aberto
       await handleWebhook(makePayload(PHONES.comerciante, 'Leite Ninho'))
       const msgs = getSimMessages()
-      const body = msgs.find(m => m.to === PHONES.comerciante)?.body ?? ''
+      const body = msgs.find(m => m.to === PHONES.comerciante)?.text ?? ''
       if (!body.includes('1') || !body.includes('2')) throw new Error(`Deveria perguntar o que fazer: ${body}`)
       return { ok: true, msg: 'Nova lista com cotação aberta → perguntou 1=ver/2=nova' }
     },
@@ -310,13 +314,14 @@ export const scenarios = [
 
       clearSimMessages()
       await handleWebhook(payload)
+      const countAposPrimeiro = getSimMessages().length
+
       await handleWebhook(payload) // segundo envio com mesmo ID
       await handleWebhook(payload) // terceiro
 
-      const msgs = getSimMessages()
-      const respostas = msgs.filter(m => m.to === PHONES.comerciante)
-      if (respostas.length > 1) throw new Error(`Mensagem processada ${respostas.length}x — dedup falhou`)
-      return { ok: true, msg: `Webhook deduplicado: ${respostas.length} resposta para 3 entregas com mesmo ID` }
+      const countTotal = getSimMessages().length
+      if (countTotal !== countAposPrimeiro) throw new Error(`Dedup falhou: ${countTotal - countAposPrimeiro} msg(s) extras após 2ª e 3ª entregas`)
+      return { ok: true, msg: `Webhook deduplicado: ${countAposPrimeiro} msg(s) para 3 entregas com mesmo ID` }
     },
     teardown: async () => { await cleanupPhones({ c: PHONES.comerciante }) }
   },
@@ -330,6 +335,7 @@ export const scenarios = [
       await seedComerciantge(PHONES.comerciante)
       const rep = await seedRep(PHONES.representante)
       await seedCatalogo(rep.id, [{ produto: 'Coca-Cola 2L', marca: 'Coca-Cola', unidade: 'caixa', preco: 46.50 }])
+      await seedVinculo(PHONES.comerciante, PHONES.representante)
     },
     run: async (handleWebhook) => {
       await handleWebhook(makePayload(PHONES.comerciante, 'Coca-Cola'))
@@ -346,7 +352,7 @@ export const scenarios = [
       ])
 
       const msgs = getSimMessages()
-      const comparativos = msgs.filter(m => m.to === PHONES.comerciante && m.body.includes('R$'))
+      const comparativos = msgs.filter(m => m.to === PHONES.comerciante && m.text.includes('R$'))
       if (comparativos.length > 1) throw new Error(`Comparativo enviado ${comparativos.length}x — lock falhou`)
       return { ok: true, msg: 'Lock funcionou: comparativo enviado 1x mesmo com consolidação paralela' }
     },
@@ -390,7 +396,7 @@ export const scenarios = [
       await handleWebhook(makePayload(PHONES.comerciante, 'Coca-Cola'))
       await handleWebhook(makePayload(PHONES.comerciante, '1'))
       const msgs = getSimMessages()
-      const body = msgs.find(m => m.to === PHONES.comerciante)?.body ?? ''
+      const body = msgs.find(m => m.to === PHONES.comerciante)?.text ?? ''
       if (!body) throw new Error('Nenhuma mensagem ao comerciante sem reps')
       // Não deve crashar silenciosamente
       return { ok: true, msg: `Sem reps: comerciante recebeu: ${body.slice(0, 80)}` }
@@ -448,6 +454,7 @@ export const scenarios = [
       await cleanupPhones({ c: PHONES.comerciante, r: PHONES.representante })
       await seedComerciantge(PHONES.comerciante)
       await seedRep(PHONES.representante)
+      await seedVinculo(PHONES.comerciante, PHONES.representante)
       // Sem catálogo → modo manual
     },
     run: async (handleWebhook) => {
@@ -458,7 +465,7 @@ export const scenarios = [
       const msgRep = msgs.find(m => m.to === PHONES.representante)
       if (!msgRep) throw new Error('Rep não recebeu cotação')
       // Se agrupamento por setor implementado, deve ter seções
-      const body = msgRep.body
+      const body = msgRep.text
       const temSetor = body.toLowerCase().includes('bebidas') ||
                        body.toLowerCase().includes('mercearia') ||
                        body.toLowerCase().includes('higiene') ||

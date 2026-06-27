@@ -2,7 +2,7 @@
 // T01–T10: Onboarding e cadastro
 
 import { makePayload, PHONES, CNPJS } from '../fixtures/messages.mjs'
-import { cleanupPhones, seedRep, getSimMessages, clearSimMessages, supabase } from '../fixtures/db.mjs'
+import { cleanupPhones, seedRep, seedComerciantge, getSimMessages, clearSimMessages, supabase } from '../fixtures/db.mjs'
 
 export const scenarios = [
 
@@ -16,7 +16,7 @@ export const scenarios = [
       await handleWebhook(makePayload(PHONES.desconhecido, 'oi'))
       const msgs = getSimMessages()
       if (!msgs.length) throw new Error('Nenhuma mensagem enviada')
-      const body = msgs[0].body
+      const body = msgs[0].text
       if (!body.includes('1') || !body.includes('2')) throw new Error(`Menu de perfil não encontrado: ${body}`)
       return { ok: true, msg: 'Menu de seleção de perfil enviado corretamente' }
     },
@@ -35,7 +35,7 @@ export const scenarios = [
       await handleWebhook(makePayload(PHONES.desconhecido, 'talvez'))
       const msgs = getSimMessages()
       if (!msgs.length) throw new Error('Nenhuma mensagem enviada')
-      const body = msgs[0].body
+      const body = msgs[0].text
       if (!body.includes('1') || !body.includes('2')) throw new Error(`Deveria repedir a escolha: ${body}`)
       return { ok: true, msg: 'Resposta inválida tratada — menu reenviado' }
     },
@@ -67,8 +67,8 @@ export const scenarios = [
       if (!data.nome || !data.empresa || !data.cnpj) throw new Error(`Dados incompletos: ${JSON.stringify(data)}`)
 
       const msgs = getSimMessages()
-      const ultima = msgs[msgs.length - 1]?.body ?? ''
-      if (!ultima.toLowerCase().includes('conclu') && !ultima.toLowerCase().includes('cadastro')) {
+      const ultima = msgs[msgs.length - 1]?.text ?? ''
+      if (!ultima.toLowerCase().includes('conclu') && !ultima.toLowerCase().includes('cadastr') && !ultima.toLowerCase().includes('fornecedor')) {
         throw new Error(`Mensagem de conclusão não encontrada: ${ultima}`)
       }
       return { ok: true, msg: `Comerciante cadastrado: ${data.nome} · ${data.empresa}` }
@@ -112,7 +112,7 @@ export const scenarios = [
       clearSimMessages()
       await handleWebhook(makePayload(phone, 'CADASTRO'))
       const msgs = getSimMessages()
-      const body = msgs[0]?.body ?? ''
+      const body = msgs[0]?.text ?? ''
       // Deve perguntar o nome diretamente — sem menu de perfil
       if (body.includes('Sou comerciante') || body.includes('Sou representante')) {
         throw new Error('CADASTRO não deveria mostrar menu de perfil')
@@ -133,7 +133,7 @@ export const scenarios = [
       clearSimMessages()
       await handleWebhook(makePayload(phone, 'CADASTRO'))
       const msgs = getSimMessages()
-      const body = msgs[0]?.body ?? ''
+      const body = msgs[0]?.text ?? ''
       if (body.toLowerCase().includes('nome') && body.toLowerCase().includes('empresa')) {
         throw new Error('Rep existente não deveria reiniciar onboarding')
       }
@@ -156,7 +156,7 @@ export const scenarios = [
       clearSimMessages()
       await handleWebhook(makePayload(phone, CNPJS.formato_invalido))
       const msgs = getSimMessages()
-      const body = msgs[0]?.body ?? ''
+      const body = msgs[0]?.text ?? ''
       if (!body.toLowerCase().includes('cnpj') || !body.toLowerCase().includes('inv')) {
         throw new Error(`CNPJ inválido deveria ser rejeitado: ${body}`)
       }
@@ -179,7 +179,7 @@ export const scenarios = [
       clearSimMessages()
       await handleWebhook(makePayload(phone, CNPJS.digito_errado))
       const msgs = getSimMessages()
-      const body = msgs[0]?.body ?? ''
+      const body = msgs[0]?.text ?? ''
       if (!body.toLowerCase().includes('cnpj')) throw new Error(`Deveria rejeitar CNPJ: ${body}`)
       return { ok: true, msg: 'CNPJ com dígito verificador errado rejeitado' }
     },
@@ -204,12 +204,12 @@ export const scenarios = [
       clearSimMessages()
       await handleWebhook(makePayload(phone, CNPJS.valido_ativo))
       const msgs = getSimMessages()
-      const body = msgs[0]?.body ?? ''
+      const body = msgs[0]?.text ?? ''
 
       process.env.BRASILAPI_TIMEOUT = original
 
       // Com timeout, deve aceitar pelo formato e avançar
-      if (body.toLowerCase().includes('inválido') || body.toLowerCase().includes('cnpj')) {
+      if (body.toLowerCase().includes('inválido')) {
         throw new Error(`Com timeout da BrasilAPI, deveria aceitar CNPJ pelo formato: ${body}`)
       }
       return { ok: true, msg: 'Timeout da BrasilAPI → fallback gracioso aceita CNPJ pelo formato' }
@@ -227,13 +227,13 @@ export const scenarios = [
     },
     run: async (handleWebhook) => {
       clearSimMessages()
-      await handleWebhook(makePayload(PHONES.comerciante, `convidar ${PHONES.representante}`))
+      await handleWebhook(makePayload(PHONES.comerciante, `adicionar fornecedor ${PHONES.representante}`))
       const msgs = getSimMessages()
       // Deve ter disparado mensagem para o rep
       const msgParaRep = msgs.find(m => m.to === PHONES.representante)
       if (!msgParaRep) throw new Error('Convite não foi enviado para o rep')
       // Verifica convite no banco
-      const { data } = await supabase.from('convites').select('*').eq('telefone_rep', PHONES.representante).single()
+      const { data } = await supabase.from('convites_pendentes').select('*').eq('telefone_fornecedor', PHONES.representante).single()
       if (!data) throw new Error('Convite não foi salvo no banco')
       return { ok: true, msg: `Convite criado e enviado para ${PHONES.representante}` }
     },

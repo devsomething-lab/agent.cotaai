@@ -2,7 +2,7 @@
 // T42–T52: Cenários complementares
 
 import { makePayload, PHONES, CNPJS } from '../fixtures/messages.mjs'
-import { cleanupPhones, seedRep, seedComerciantge, seedCatalogo, getSimMessages, clearSimMessages, getUltimaCotacao, supabase } from '../fixtures/db.mjs'
+import { cleanupPhones, seedRep, seedComerciantge, seedCatalogo, seedVinculo, getSimMessages, clearSimMessages, getUltimaCotacao, supabase } from '../fixtures/db.mjs'
 
 export const scenarios = [
 
@@ -14,18 +14,22 @@ export const scenarios = [
       await cleanupPhones({ c: PHONES.comerciante, r: PHONES.representante })
       await seedComerciantge(PHONES.comerciante)
       // Cria convite pendente diretamente no banco
-      await supabase.from('convites').insert({
-        telefone_rep: PHONES.representante,
-        comerciante_id: (await supabase.from('comerciantes').select('id').eq('telefone', PHONES.comerciante).single()).data.id,
-        status: 'pendente',
-      }).catch(() => {}) // ignora se tabela não existe ainda
+      try {
+        const { data: com } = await supabase.from('comerciantes').select('id').eq('telefone', PHONES.comerciante).single()
+        await supabase.from('convites_pendentes').insert({
+          telefone_fornecedor: PHONES.representante,
+          comerciante_id: com.id,
+          aceito: false,
+          criado_em: new Date().toISOString(),
+        })
+      } catch {} // ignora se tabela não existe ainda
     },
     run: async (handleWebhook) => {
       clearSimMessages()
       // Rep clica em confirmar — simula resposta ao template
       await handleWebhook(makePayload(PHONES.representante, 'Confirmar'))
       const msgs = getSimMessages()
-      const body = msgs.find(m => m.to === PHONES.representante)?.body ?? ''
+      const body = msgs.find(m => m.to === PHONES.representante)?.text ?? ''
       // Deve iniciar onboarding do rep
       if (!body.toLowerCase().includes('nome') && !body.toLowerCase().includes('cadastro')) {
         return { ok: true, msg: 'Tabela convites pode não existir ainda — cenário pendente de implementação' }
@@ -51,7 +55,7 @@ export const scenarios = [
       // Em SIM_MODE a BrasilAPI não é chamada — verifica só o formato
       await handleWebhook(makePayload(phone, CNPJS.valido_ativo))
       const msgs = getSimMessages()
-      const body = msgs[0]?.body ?? ''
+      const body = msgs[0]?.text ?? ''
       if (body.toLowerCase().includes('inválido') || body.toLowerCase().includes('cnpj inválido')) {
         throw new Error(`CNPJ válido foi rejeitado: ${body}`)
       }
@@ -77,7 +81,7 @@ export const scenarios = [
       clearSimMessages()
       await handleWebhook(makePayload(phone, CNPJS.inativo))
       const msgs = getSimMessages()
-      const body = msgs[0]?.body ?? ''
+      const body = msgs[0]?.text ?? ''
       if (!body.toLowerCase().includes('inativo') && !body.toLowerCase().includes('cnpj')) {
         throw new Error(`CNPJ inativo deveria ser rejeitado: ${body}`)
       }
@@ -94,6 +98,7 @@ export const scenarios = [
       await cleanupPhones({ c: PHONES.comerciante, r: PHONES.representante })
       await seedComerciantge(PHONES.comerciante)
       await seedRep(PHONES.representante)
+      await seedVinculo(PHONES.comerciante, PHONES.representante)
     },
     run: async (handleWebhook) => {
       // Cotação com 3 itens
@@ -128,7 +133,7 @@ export const scenarios = [
       clearSimMessages()
       await handleWebhook(makePayload(PHONES.comerciante, 'histórico'))
       const msgs = getSimMessages()
-      const body = msgs.find(m => m.to === PHONES.comerciante)?.body ?? ''
+      const body = msgs.find(m => m.to === PHONES.comerciante)?.text ?? ''
       if (!body) throw new Error('Nenhuma resposta ao comando histórico')
       // Não deve crashar — deve informar que não há cotações
       if (body.toLowerCase().includes('erro') || body.toLowerCase().includes('undefined')) {
@@ -146,7 +151,9 @@ export const scenarios = [
     setup: async () => {
       await cleanupPhones({ c: PHONES.comerciante, r: PHONES.representante })
       await seedComerciantge(PHONES.comerciante)
-      await seedRep(PHONES.representante)
+      const rep = await seedRep(PHONES.representante)
+      await seedCatalogo(rep.id, [{ produto: 'Coca-Cola 2L', marca: 'Coca-Cola', unidade: 'caixa', preco: 46.50 }])
+      await seedVinculo(PHONES.comerciante, PHONES.representante)
     },
     run: async (handleWebhook) => {
       await handleWebhook(makePayload(PHONES.comerciante, 'Coca-Cola'))
@@ -197,7 +204,7 @@ export const scenarios = [
       await handleWebhook(makePayload(PHONES.comerciante, '1'))
       const msgs = getSimMessages()
       // Todas as mensagens ao comerciante devem ter menos de 4096 chars
-      const longas = msgs.filter(m => m.to === PHONES.comerciante && m.body.length > 4096)
+      const longas = msgs.filter(m => m.to === PHONES.comerciante && m.text.length > 4096)
       if (longas.length) throw new Error(`${longas.length} mensagem(ns) ultrapassaram 4096 chars`)
       return { ok: true, msg: `Lista com 20 itens processada — todas as msgs dentro do limite de 4096 chars` }
     },
@@ -240,7 +247,7 @@ export const scenarios = [
       // Envia sem quantidade
       await handleWebhook(makePayload(PHONES.comerciante, 'Coca-Cola'))
       const msgs = getSimMessages()
-      const confirmacao = msgs.find(m => m.to === PHONES.comerciante)?.body ?? ''
+      const confirmacao = msgs.find(m => m.to === PHONES.comerciante)?.text ?? ''
       // Se sugestão implementada, deve mencionar 5 ou "sugestão"
       const temSugestao = confirmacao.includes('5') || confirmacao.toLowerCase().includes('sugest')
       return {
@@ -285,7 +292,7 @@ export const scenarios = [
       if (!msgRep) {
         // Ou avisa ao comerciante que não tem cobertura
         const msgCom = msgs.find(m => m.to === PHONES.comerciante)
-        return { ok: true, msg: `Catálogo expirado ignorado — sem cobertura automática: ${msgCom?.body?.slice(0, 60)}` }
+        return { ok: true, msg: `Catálogo expirado ignorado — sem cobertura automática: ${msgCom?.text?.slice(0, 60)}` }
       }
       return { ok: true, msg: 'Catálogo expirado ignorado — cotação enviada ao rep manualmente' }
     },
@@ -301,6 +308,7 @@ export const scenarios = [
       await seedComerciantge(PHONES.comerciante)
       const rep = await seedRep(PHONES.representante)
       await seedCatalogo(rep.id, [{ produto: 'Coca-Cola 2L', marca: 'Coca-Cola', unidade: 'caixa', preco: 46.50, prazo_pagamento: 30, prazo_entrega: 2 }])
+      await seedVinculo(PHONES.comerciante, PHONES.representante)
     },
     run: async (handleWebhook) => {
       await handleWebhook(makePayload(PHONES.comerciante, 'Coca-Cola'))
@@ -337,6 +345,8 @@ export const scenarios = [
         { produto: 'Coca-Cola 2L', marca: 'Coca-Cola', unidade: 'caixa', preco: 48.00, prazo_pagamento: 30, prazo_entrega: 1 },
         { produto: 'Leite Ninho 400g', marca: 'Ninho', unidade: 'unidade', preco: 12.00, prazo_pagamento: 30, prazo_entrega: 1 },
       ])
+      await seedVinculo(PHONES.comerciante, PHONES.representante)
+      await seedVinculo(PHONES.comerciante, PHONES.representante2)
     },
     run: async (handleWebhook) => {
       await handleWebhook(makePayload(PHONES.comerciante, 'Coca-Cola\nLeite Ninho'))
@@ -347,7 +357,7 @@ export const scenarios = [
       await handleWebhook(makePayload(PHONES.comerciante, '1')) // confirma
       await handleWebhook(makePayload(PHONES.comerciante, 'item a item'))
       const msgs = getSimMessages()
-      const body = msgs.find(m => m.to === PHONES.comerciante)?.body ?? ''
+      const body = msgs.find(m => m.to === PHONES.comerciante)?.text ?? ''
       const temItemAItem = body.toLowerCase().includes('item') || body.toLowerCase().includes('produto')
       return {
         ok: true,

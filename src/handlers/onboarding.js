@@ -584,7 +584,7 @@ function extrairTelefones(texto) {
 // Retorna: 'ativo' | 'inativo' | 'indisponivel'
 async function consultarCNPJ(cnpj) {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 5000)
+  const timer = setTimeout(() => controller.abort(), parseInt(process.env.BRASILAPI_TIMEOUT ?? '5000', 10))
   try {
     const res = await fetch(`https://brasilapi.com.br/api/cnpj/v1/${cnpj}`, {
       signal: controller.signal,
@@ -605,6 +605,7 @@ async function consultarCNPJ(cnpj) {
 function normalizarCNPJ(valor) {
   const digits = (valor ?? '').replace(/\D/g, '')
   if (digits.length !== 14) return null
+  if (/^(\d)\1{13}$/.test(digits)) return null
   // Validação dos dígitos verificadores
   const calc = (v, n) => {
     let sum = 0, pos = n - 7
