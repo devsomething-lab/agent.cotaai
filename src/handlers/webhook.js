@@ -561,7 +561,7 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
       // Resposta "2" — reprocessa a lista salva automaticamente
       const eraMidia = listaSalva.startsWith('[') && listaSalva.endsWith(']')
       if (eraMidia) {
-        await sendText(phone, 'Cotação anterior cancelada! Reenvie sua lista de produtos. 📋')
+        await sendText(phone, 'Cotação anterior cancelada! Reenvie sua lista de produtos.')
         return { ok: true }
       }
       return handleMensagemComerciantge({ phone, message: listaSalva, type: 'texto', mediaId: null, mimeType: null })
@@ -625,7 +625,7 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
   }
 
   if (!extraido.itens?.length) {
-    await sendText(phone, '🤔 Não encontrei nenhum produto. Pode tentar novamente?')
+    await sendText(phone, 'Não encontrei nenhum produto. Pode tentar novamente?')
     return { ok: true }
   }
 
@@ -733,7 +733,7 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
     if (itensSemCobertura.length) {
       msgs.push(`${itensSemCobertura.length} item(ns) sem cobertura em nenhum catálogo`)
     }
-    msgs.push(``, `⏰ Consolidarei as respostas em até ${TIMEOUT_HORAS}h.`)
+    msgs.push(``, `Consolidarei as respostas em até ${TIMEOUT_HORAS}h.`)
     await sendText(phone, msgs.join('\n'))
   }
 
@@ -898,7 +898,7 @@ async function handleAtualizacaoCatalogo({ rep, message, type, mediaId, mimeType
       msgs.push(``)
       msgs.push(`*Variações de preço detectadas (≥10%):*`)
       for (const al of resultado.alertas) {
-        const seta = al.subiu ? '📈' : '📉'
+        const seta = al.subiu ? '(+)' : '(-)'
         const sinal = al.subiu ? '+' : ''
         msgs.push(`${seta} ${al.produto}: R$ ${al.preco_anterior?.toFixed(2)} → R$ ${al.preco_novo?.toFixed(2)} (${sinal}${al.variacao_pct}%)`)
       }
@@ -955,7 +955,7 @@ async function notificarComerciantesComVariacao(alertas, rep) {
       if (!alertasDoItem.length) continue
 
       const linhasAlerta = alertasDoItem.map(al => {
-        const seta = al.subiu ? '📈' : '📉'
+        const seta = al.subiu ? '(+)' : '(-)'
         const sinal = al.subiu ? '+' : ''
         return `${seta} ${al.produto}: ${sinal}${al.variacao_pct}% (R$ ${al.preco_anterior?.toFixed(2)} → R$ ${al.preco_novo?.toFixed(2)})`
       }).join('\n')
@@ -980,7 +980,7 @@ async function notificarComerciantesComVariacao(alertas, rep) {
 // ── Rep envia promoção ────────────────────────────────────────────────
 
 async function handlePromocao({ rep, message }) {
-  await sendText(rep.telefone, '🏷️ Recebi sua promoção! Processando...')
+  await sendText(rep.telefone, 'Recebi sua promoção! Processando...')
 
   try {
     const extraido = await extrairCatalogo({ tipo: 'texto', texto: message })
@@ -1220,9 +1220,9 @@ async function handleVerCotacaoAtual(comerciante, phone) {
 
   const statusMsg = {
     aguardando_respostas:       'Aguardando respostas dos fornecedores',
-    aguardando_escolha:         '📊 Comparativo pronto — aguardando sua escolha',
-    aguardando_modo_fechamento: '📊 Comparativo pronto — escolha como fechar',
-    escolha_item_a_item:        '🛒 Escolhendo fornecedor item a item',
+    aguardando_escolha:         'Comparativo pronto — aguardando sua escolha',
+    aguardando_modo_fechamento: 'Comparativo pronto — escolha como fechar',
+    escolha_item_a_item:        'Escolhendo fornecedor item a item',
     consulta:                   'Salva para consulta',
   }[cotacao.status] ?? cotacao.status
 
@@ -1285,13 +1285,13 @@ async function handleHistorico(comerciante, phone) {
     return { ok: true }
   }
 
-  const statusEmoji = {
-    pedido_gerado: '✅', aguardando_escolha: '📊', aguardando_modo_fechamento: '📊',
-    escolha_item_a_item: '🛒', aguardando_respostas: '⏳', consulta: '🔍', cancelada: '❌'
+  const statusLabel = {
+    pedido_gerado: '[pedido]', aguardando_escolha: '[comparativo]', aguardando_modo_fechamento: '[comparativo]',
+    escolha_item_a_item: '[item a item]', aguardando_respostas: '[aguardando]', consulta: '[consulta]', cancelada: '[cancelada]'
   }
 
-  const linhas = cotacoes.map(c => 
-    `${statusEmoji[c.status] ?? '•'} *#${c.id.slice(-6).toUpperCase()}* — ${new Date(c.criado_em).toLocaleDateString('pt-BR')} — ${c.input_raw?.slice(0, 40) ?? ''}...`
+  const linhas = cotacoes.map(c =>
+    `${statusLabel[c.status] ?? '[-]'} *#${c.id.slice(-6).toUpperCase()}* — ${new Date(c.criado_em).toLocaleDateString('pt-BR')} — ${c.input_raw?.slice(0, 40) ?? ''}...`
   ).join('\n')
 
   await sendText(phone, `*Suas últimas cotações:*\n\n${linhas}\n\nEnvie *minha cotação* para ver detalhes da cotação em aberto.`)

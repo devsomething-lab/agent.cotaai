@@ -204,7 +204,7 @@ cron.schedule('*/30 * * * *', async () => {
 const PORT = parseInt(process.env.PORT ?? '3000')
 try {
   await app.listen({ port: PORT, host: '0.0.0.0' })
-  console.log(`\n🚀 CotAI backend rodando na porta ${PORT}`)
+  console.log(`\nCotAI backend rodando na porta ${PORT}`)
   console.log(`   Webhook: POST /webhook`)
   console.log(`   Dashboard API: GET /api/cotacoes\n`)
 } catch (err) {

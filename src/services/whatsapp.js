@@ -33,7 +33,7 @@ export async function sendDocument(telefone, url, filename, caption = null) {
   if (SIM_MODE) {
     const msg = `[DOCUMENTO: ${filename}] ${url}${caption ? ` | caption: ${caption}` : ''}`
     _simCapture.push({ to: telefone, text: msg, sentAt: new Date().toISOString() })
-    console.log(`\n📎 [KOTA → ${telefone}] ${msg}\n`)
+    console.log(`\n[KOTA → ${telefone}] ${msg}\n`)
     return { simulated: true }
   }
   const { data } = await meta.post(`/${PHONE_NUMBER_ID}/messages`, {
@@ -55,7 +55,7 @@ export async function sendDocument(telefone, url, filename, caption = null) {
 export async function sendText(telefone, texto) {
   if (SIM_MODE) {
     _simCapture.push({ to: telefone, text: texto, sentAt: new Date().toISOString() })
-    console.log(`\n📤 [KOTA → ${telefone}]\n${texto}\n`)
+    console.log(`\n[KOTA → ${telefone}]\n${texto}\n`)
     return { simulated: true }
   }
   const { data } = await meta.post(`/${PHONE_NUMBER_ID}/messages`, {
@@ -75,7 +75,7 @@ export async function sendButtons(telefone, texto, botoes) {
     const label = botoes.map((b, i) => `[${i + 1}] ${b.label}`).join('  ')
     const full  = `${texto}\n${label}`
     _simCapture.push({ to: telefone, text: full, sentAt: new Date().toISOString() })
-    console.log(`\n📤 [KOTA → ${telefone}] (buttons)\n${full}\n`)
+    console.log(`\n[KOTA → ${telefone}] (buttons)\n${full}\n`)
     return { simulated: true }
   }
   const { data } = await meta.post(`/${PHONE_NUMBER_ID}/messages`, {
@@ -169,7 +169,7 @@ export function templateComparativo(consolidado, cotacaoId) {
     const en       = props[0]?.prazo_entrega_dias
     const isMelhor = melhorFornecedor?.nome === rep
 
-    msg.push(`${isMelhor ? '🏆' : ''} *${i + 1}. ${rep}*${isMelhor ? ' — melhor oferta' : ''}`)
+    msg.push(`*${i + 1}. ${rep}*${isMelhor ? ' — melhor oferta' : ''}`)
     props.forEach(p => msg.push(`  ${p.produto} · R$ ${p.preco_unitario?.toFixed(2)}`))
     msg.push(`  Total R$ ${total.toFixed(2)} · pgto ${pg ?? '?'}d · entrega ${en ?? '?'}d`)
     msg.push('')

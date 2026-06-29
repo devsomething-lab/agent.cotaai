@@ -363,6 +363,6 @@ export async function transcreverAudio(audioUrl, mimeType = 'audio/ogg') {
   return {
     transcricao: null,
     fallback: true,
-    mensagem: '🎙️ Recebi seu áudio! No momento ainda estou aprendendo a processar áudios. Pode me enviar a lista por texto ou foto? Assim processo mais rápido! 😊',
+    mensagem: 'Recebi seu áudio! No momento ainda estou aprendendo a processar áudios. Pode me enviar a lista por texto ou foto? Assim processo mais rápido!',
   }
 }
