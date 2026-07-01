@@ -155,7 +155,7 @@ Se não estiver no histórico e não tiver quantidade, use 1.` : ''
       }
 
       const response = await client.messages.create({
-        model: 'claude-sonnet-4-5', max_tokens: 8192,
+        model: 'claude-sonnet-4-6', max_tokens: 8192,
         system: systemPrompt,
         messages: [{ role: 'user', content: userContent }],
       })
@@ -175,7 +175,7 @@ Se não estiver no histórico e não tiver quantidade, use 1.` : ''
   if (blocos.length === 1) {
     // Lista pequena — chamada única
     const response = await client.messages.create({
-      model: 'claude-sonnet-4-5', max_tokens: 8192,
+      model: 'claude-sonnet-4-6', max_tokens: 8192,
       system: systemPrompt,
       messages: [{ role: 'user', content: `Lista do comerciante:\n${mensagem.texto}` }],
     })
@@ -186,7 +186,7 @@ Se não estiver no histórico e não tiver quantidade, use 1.` : ''
   console.log(`[extrairListaProdutos] lista grande: processando ${blocos.length} blocos em paralelo`)
   const promises = blocos.map((bloco, i) =>
     client.messages.create({
-      model: 'claude-sonnet-4-5', max_tokens: 8192,
+      model: 'claude-sonnet-4-6', max_tokens: 8192,
       system: systemPrompt,
       messages: [{ role: 'user', content: `Lista do comerciante (parte ${i + 1} de ${blocos.length}):\n${bloco}` }],
     })
@@ -290,7 +290,7 @@ Formato:
 }`
 
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-5',
+    model: 'claude-sonnet-4-6',
     max_tokens: 1024,
     system,
     messages: [{ role: 'user', content: `Resposta do representante:\n${texto}` }],

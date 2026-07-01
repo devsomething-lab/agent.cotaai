@@ -151,7 +151,7 @@ export async function extrairCatalogo(mensagem) {
   const maxTokens = ['foto', 'pdf'].includes(mensagem.tipo) ? 8192 : 4096
 
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-5',
+    model: 'claude-sonnet-4-6',
     max_tokens: maxTokens,
     system,
     messages: [{ role: 'user', content }],
