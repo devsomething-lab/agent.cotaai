@@ -100,6 +100,19 @@ function unlockCotacao(cotacaoId) {
   _cotacoesEmProcessamento.delete(cotacaoId)
 }
 
+// ── Navegação no histórico de cotações ───────────────────────────────
+const _estadosHistorico = new Map() // phone → { cotacoes: [id,...], expiresAt }
+
+function setEstadoHistorico(phone, cotacoes) {
+  _estadosHistorico.set(phone, { cotacoes, expiresAt: Date.now() + 5 * 60_000 })
+}
+function getEstadoHistorico(phone) {
+  const h = _estadosHistorico.get(phone)
+  if (!h) return null
+  if (Date.now() > h.expiresAt) { _estadosHistorico.delete(phone); return null }
+  return h
+}
+
 // ── Aguardando confirmação de salvar catálogo (após resposta manual) ──
 const _pendenteCatalogo = new Map() // phone → { message, expiresAt }
 
@@ -354,6 +367,18 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
 
   if (cmd === 'historico' || cmd === 'histórico') {
     return handleHistorico(comerciante, phone)
+  }
+
+  // ── Navegação no histórico: usuário digitou número após ver a lista ──
+  const estadoHistorico = getEstadoHistorico(phone)
+  if (estadoHistorico && type === 'texto') {
+    const num = parseInt(cmd)
+    if (!isNaN(num) && num >= 1 && num <= estadoHistorico.cotacoes.length) {
+      _estadosHistorico.delete(phone)
+      return handleHistoricoDetalhe(estadoHistorico.cotacoes[num - 1], phone)
+    }
+    // Número inválido ou outro comando — limpa o estado e continua o fluxo normal
+    _estadosHistorico.delete(phone)
   }
 
   // ── Cotação aguardando confirmação da lista ───────────────────────
@@ -1365,7 +1390,7 @@ async function handleCancelarCotacao(comerciante, phone) {
 async function handleHistorico(comerciante, phone) {
   const { data: cotacoes } = await supabase
     .from('cotacoes')
-    .select('id, status, criado_em, cotacao_itens(produto)')
+    .select('id, status, criado_em, cotacao_itens(id)')
     .eq('comerciante_id', comerciante.id)
     .order('criado_em', { ascending: false })
     .limit(5)
@@ -1376,16 +1401,15 @@ async function handleHistorico(comerciante, phone) {
   }
 
   const statusLabel = {
-    pedido_gerado:            'Pedido gerado',
-    aguardando_escolha:       'Aguardando escolha',
+    pedido_gerado:              'Pedido gerado',
+    aguardando_escolha:         'Aguardando sua escolha',
     aguardando_modo_fechamento: 'Aguardando fechamento',
-    escolha_item_a_item:      'Escolha item a item',
-    aguardando_respostas:     'Aguardando respostas',
-    consulta:                 'Salvo sem pedido',
-    cancelada:                'Cancelada',
+    escolha_item_a_item:        'Em fechamento',
+    aguardando_respostas:       'Aguardando respostas',
+    consulta:                   'Salvo sem pedido',
+    cancelada:                  'Cancelada',
   }
 
-  // Busca pedidos das cotações finalizadas
   const idsPedido = cotacoes.filter(c => c.status === 'pedido_gerado').map(c => c.id)
   let pedidosPorCotacao = {}
   if (idsPedido.length) {
@@ -1396,46 +1420,91 @@ async function handleHistorico(comerciante, phone) {
     for (const p of pedidos ?? []) {
       if (!pedidosPorCotacao[p.cotacao_id]) pedidosPorCotacao[p.cotacao_id] = []
       pedidosPorCotacao[p.cotacao_id].push({
-        id:    p.id.slice(-6).toUpperCase(),
-        valor: p.valor_total,
-        rep:   p.representantes?.nome ?? null,
+        id: p.id.slice(-6).toUpperCase(), valor: p.valor_total, rep: p.representantes?.nome ?? null,
       })
     }
   }
 
-  const linhas = []
-  for (const c of cotacoes) {
+  const linhas = ['*Suas cotações:*', '']
+  const ids = []
+  cotacoes.forEach((c, i) => {
+    ids.push(c.id)
     const label  = statusLabel[c.status] ?? c.status
     const data   = new Date(c.criado_em).toLocaleDateString('pt-BR')
-    const itens  = c.cotacao_itens ?? []
-    const nItens = itens.length
-    const preview = itens.slice(0, 2).map(i => i.produto).join(', ')
-    const previewStr = nItens > 0
-      ? `${nItens} item${nItens > 1 ? 'ns' : ''}: ${preview}${nItens > 2 ? '...' : ''}`
-      : 'sem itens'
-
-    linhas.push(`*${label}* · #${c.id.slice(-6).toUpperCase()} · ${data}`)
-    linhas.push(`  ${previewStr}`)
-
+    const nItens = (c.cotacao_itens ?? []).length
     const pedidos = pedidosPorCotacao[c.id]
+
+    let linha = `${i + 1}. #${c.id.slice(-6).toUpperCase()} · ${data} · ${label} · ${nItens} item${nItens !== 1 ? 'ns' : ''}`
     if (pedidos?.length) {
-      for (const p of pedidos) {
-        const valorStr = p.valor ? ` · R$ ${p.valor.toFixed(2)}` : ''
-        const repStr   = p.rep ? ` · ${p.rep}` : ''
-        linhas.push(`  Pedido #${p.id}${repStr}${valorStr}`)
-      }
+      const total = pedidos.reduce((s, p) => s + (p.valor ?? 0), 0)
+      linha += ` · R$ ${total.toFixed(2)}`
     }
-    linhas.push('')
+    linhas.push(linha)
+  })
+
+  linhas.push('')
+  linhas.push(`Digite o número para ver os detalhes (ex: *1*).`)
+
+  setEstadoHistorico(phone, ids)
+  await sendText(phone, linhas.join('\n'))
+  return { ok: true }
+}
+
+async function handleHistoricoDetalhe(cotacaoId, phone) {
+  const { cotacao, itens } = await getCotacaoComItens(cotacaoId)
+  if (!cotacao) {
+    await sendText(phone, 'Cotação não encontrada.')
+    return { ok: true }
   }
 
-  // Verifica se há cotação aberta para adaptar a dica final
-  const statusAbertos = ['aguardando_respostas', 'aguardando_escolha', 'aguardando_modo_fechamento', 'escolha_item_a_item']
-  const temAberta = cotacoes.some(c => statusAbertos.includes(c.status))
-  const dica = temAberta
-    ? 'Envie *minha cotação* para retomar a cotação em aberto.'
-    : 'Envie sua lista de produtos quando quiser fazer uma nova cotação.'
+  const statusLabel = {
+    pedido_gerado:              'Pedido gerado',
+    aguardando_escolha:         'Aguardando sua escolha',
+    aguardando_modo_fechamento: 'Aguardando fechamento',
+    escolha_item_a_item:        'Em fechamento',
+    aguardando_respostas:       'Aguardando respostas dos fornecedores',
+    consulta:                   'Salvo sem pedido',
+    cancelada:                  'Cancelada',
+  }
 
-  await sendText(phone, `*Suas últimas cotações:*\n\n${linhas.join('\n')}\n${dica}`)
+  const label = statusLabel[cotacao.status] ?? cotacao.status
+  const data  = new Date(cotacao.criado_em).toLocaleDateString('pt-BR')
+
+  const linhas = [
+    `*Cotação #${cotacaoId.slice(-6).toUpperCase()} · ${data}*`,
+    `Status: ${label}`,
+    '',
+  ]
+
+  if (cotacao.status === 'pedido_gerado') {
+    const { data: pedidos } = await supabase
+      .from('pedidos')
+      .select('id, valor_total, representantes(nome), pedido_itens(produto, quantidade, preco_unitario)')
+      .eq('cotacao_id', cotacaoId)
+
+    for (const p of pedidos ?? []) {
+      linhas.push(`*${p.representantes?.nome ?? 'Fornecedor'}* — Pedido #${p.id.slice(-6).toUpperCase()}`)
+      for (const it of p.pedido_itens ?? []) {
+        linhas.push(`  ${it.produto} × ${it.quantidade ?? 1} — R$ ${it.preco_unitario?.toFixed(2)}`)
+      }
+      if (p.valor_total) linhas.push(`  _Total: R$ ${p.valor_total.toFixed(2)}_`)
+      linhas.push('')
+    }
+  } else {
+    linhas.push('*Itens:*')
+    for (const it of itens) {
+      const qtd = it.quantidade ? ` × ${it.quantidade}` : ''
+      linhas.push(`  ${it.produto}${qtd}`)
+    }
+    linhas.push('')
+
+    const statusAbertos = ['aguardando_respostas', 'aguardando_escolha', 'aguardando_modo_fechamento', 'escolha_item_a_item']
+    if (statusAbertos.includes(cotacao.status)) {
+      linhas.push('Envie *minha cotação* para retomar.')
+    }
+  }
+
+  await sendText(phone, linhas.join('\n'))
   return { ok: true }
 }
 
