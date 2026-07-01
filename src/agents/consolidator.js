@@ -144,17 +144,16 @@ export async function gerarResumoNegociacao(consolidado) {
   try {
     const response = await client.messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 300,
-      system: `Você escreve resumos concisos de comparativos de fornecedores para comerciantes brasileiros via WhatsApp.
+      max_tokens: 120,
+      system: `Você escreve um insight de 1-2 frases CURTAS sobre o comparativo de fornecedores para um comerciante brasileiro no WhatsApp.
 
 Regras:
-- Máximo 3 frases curtas, tom informal e direto
-- Use o primeiro nome do representante (sem sobrenome ou empresa)
-- Destaque o trade-off principal (preço vs entrega vs prazo pagamento)
-- Se um fornecedor for claramente melhor em tudo, diga isso
-- Use valores reais (R$, dias) para ser específico
-- NÃO use emojis, bullet points ou formatação — apenas texto corrido
-- NÃO comece com "Olá" ou saudações`,
+- Máximo 2 frases, cada uma com no máximo 20 palavras
+- Mencione valor total (R$), itens cobertos e prazos de pagamento/entrega quando disponíveis
+- Se prazos estiverem ausentes, mencione isso em uma frase
+- Sem narrativa — só fatos concretos
+- NÃO use emojis, bullets ou formatação — só texto corrido
+- NÃO comece com "Olá" ou o nome do fornecedor`,
       messages: [{
         role: 'user',
         content: `Fornecedores:\n${JSON.stringify(contextFornecedores, null, 2)}\n\nMelhor preço por item:\n${contextMelhorPreco.join('\n')}\n\nEscreva o resumo do comparativo:`,

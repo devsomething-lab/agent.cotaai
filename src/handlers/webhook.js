@@ -736,15 +736,17 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
     // Misto ou manual — avisa o que está acontecendo
     const msgs = ['Consultando fornecedores:']
     if (repsAutomaticos.length) {
-      msgs.push(`${repsAutomaticos.length} fornecedor(es) com catálogo responderam automaticamente`)
+      const n = repsAutomaticos.length
+      msgs.push(n === 1
+        ? '1 fornecedor com catálogo respondeu automaticamente'
+        : `${n} fornecedores com catálogo responderam automaticamente`)
     }
     if (repsManuais.length) {
-      msgs.push(`${repsManuais.length} fornecedor(es) sem catálogo serão consultados via WhatsApp`)
-      // Dispara para os reps sem catálogo
+      const n = repsManuais.length
+      msgs.push(n === 1
+        ? '1 fornecedor sem catálogo será consultado via WhatsApp'
+        : `${n} fornecedores sem catálogo serão consultados via WhatsApp`)
       await dispararParaRepsManuais(cotacao, itens, repsManuais)
-    }
-    if (itensSemCobertura.length) {
-      msgs.push(`${itensSemCobertura.length} item(ns) sem cobertura em nenhum catálogo`)
     }
     msgs.push(``, `Consolidarei as respostas em até ${TIMEOUT_HORAS}h.`)
     await sendText(phone, msgs.join('\n'))
@@ -1118,8 +1120,8 @@ async function handleRespostaCotacao({ rep, message }) {
       produto:              orig?.produto ?? it.produto,
       preco_unitario:       it.preco_unitario,
       preco_total:          it.preco_unitario != null && orig?.quantidade ? it.preco_unitario * orig.quantidade : null,
-      prazo_pagamento_dias: it.prazo_pagamento_dias ?? prazoPg,
-      prazo_entrega_dias:   it.prazo_entrega_dias ?? prazoEn,
+      prazo_pagamento_dias: it.prazo_pagamento_dias ?? prazoPg ?? rep.prazo_pagamento_padrao_dias ?? null,
+      prazo_entrega_dias:   it.prazo_entrega_dias ?? prazoEn ?? rep.prazo_entrega_padrao_dias ?? null,
       resposta_raw:         message,
       origem:               'manual',
     }
@@ -1587,12 +1589,19 @@ async function dispararCotacao(cotacao, comerciante) {
     await consolidarEEnviar(cotacao.id)
   } else {
     const msgs = ['Consultando fornecedores:']
-    if (repsAutomaticos.length) msgs.push(`${repsAutomaticos.length} fornecedor(es) com catálogo responderam automaticamente`)
+    if (repsAutomaticos.length) {
+      const na = repsAutomaticos.length
+      msgs.push(na === 1
+        ? '1 fornecedor com catálogo respondeu automaticamente'
+        : `${na} fornecedores com catálogo responderam automaticamente`)
+    }
     if (repsManuais.length) {
-      msgs.push(`${repsManuais.length} fornecedor(es) sem catálogo serão consultados via WhatsApp`)
+      const nm = repsManuais.length
+      msgs.push(nm === 1
+        ? '1 fornecedor sem catálogo será consultado via WhatsApp'
+        : `${nm} fornecedores sem catálogo serão consultados via WhatsApp`)
       await dispararParaRepsManuais(cotacao, itens, repsManuais)
     }
-    // Não exibir "X itens sem catálogo" — os reps manuais já os cotarão via WhatsApp
     await sendText(phone, msgs.join('\n'))
   }
 }
