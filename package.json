@@ -4,20 +4,20 @@
   "description": "CotAI – Hub de cotação inteligente via WhatsApp",
   "type": "module",
   "main": "src/server.js",
-"scripts": {
-  "dev": "node --watch src/server.js",
-  "start": "node src/server.js",
-  "test": "node test/runner.mjs",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "test": "node test/runner.mjs",
     "db:migrate": "node src/db/migrate.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
+    "@anthropic-ai/sdk": "^0.109.0",
+    "@fastify/cors": "^10.0.0",
+    "@fastify/multipart": "^9.0.0",
     "@supabase/supabase-js": "^2.49.0",
     "axios": "^1.8.0",
     "dotenv": "^16.4.0",
     "fastify": "^5.2.0",
-    "@fastify/multipart": "^9.0.0",
-    "@fastify/cors": "^10.0.0",
     "form-data": "^4.0.1",
     "node-cron": "^3.0.3",
     "xlsx": "^0.18.5",
