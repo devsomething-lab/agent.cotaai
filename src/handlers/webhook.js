@@ -7,7 +7,7 @@ import { consolidarPropostas, gerarResumoNegociacao, compararPorItem,
          montarPedidoOtimizado, montarPedidoFornecedorUnico, montarPedidoManual } from '../agents/consolidator.js'
 import { resolverCotacaoAutomatica, salvarPropostasAutomaticas } from '../agents/auto_quote.js'
 import { upsertCatalogoEmLote, salvarPromocao } from '../db/catalogo.js'
-import { sendText, sendTextOrTemplate, downloadMedia, normalizeMetaPayload,
+import { sendText, sendButtons, sendTextOrTemplate, downloadMedia, normalizeMetaPayload,
          templateCotacaoParaRep, templateComparativo, templatePedidoConfirmado } from '../services/whatsapp.js'
 import * as XLSX from 'xlsx'
 import { handleAutocadastro, getSessaoOnboarding, handleOnboardingComerciantge, getSessaoOnboardingComerciantge, handleConvidarFornecedor, iniciarOnboardingRepPorConvite } from './onboarding.js'
@@ -849,7 +849,7 @@ async function handleMensagemRepresentante({ rep, message, type, mediaId, mimeTy
     const pendente = getPendenteCatalogo(rep.telefone)
     if (pendente) {
       _pendenteCatalogo.delete(rep.telefone)
-      if (cmd === 'sim' || cmd === 'salvar' || cmd === 'sim, salvar' || cmd === 's') {
+      if (cmd === 'sim' || cmd === 'salvar' || cmd === 'sim, salvar' || cmd === 's' || cmd === 'catalogo_sim') {
         return handleAtualizacaoCatalogo({ rep, message: pendente.message, type: 'texto', mediaId: null, mimeType: null })
       }
       await sendText(rep.telefone, 'Ok! Os preços não foram salvos no catálogo.')
@@ -1106,11 +1106,14 @@ async function handleRespostaCotacao({ rep, message }) {
     .update({ status: 'respondido', modo_resposta: 'manual', respondido_em: new Date().toISOString() })
     .eq('id', envio.id)
 
-  await sendText(rep.telefone, [
-    'Proposta recebida! Obrigado. Se você for escolhido, o pedido chegará em seguida.',
-    '',
-    'Quer salvar esses preços no seu catálogo para que futuras cotações desses produtos sejam respondidas automaticamente? Responda *sim* para salvar.',
-  ].join('\n'))
+  await sendButtons(
+    rep.telefone,
+    'Proposta recebida! Obrigado. Se você for escolhido, o pedido chegará em seguida.\n\nQuer salvar esses preços no seu catálogo para que futuras cotações sejam respondidas automaticamente?',
+    [
+      { id: 'catalogo_sim', label: 'Sim, salvar' },
+      { id: 'catalogo_nao', label: 'Não' },
+    ]
+  )
 
   setPendenteCatalogo(rep.telefone, message)
 
