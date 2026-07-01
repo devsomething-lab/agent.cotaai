@@ -610,7 +610,7 @@ async function handleMensagemComerciantge({ phone, message, type, mediaId, mimeT
   try {
     extraido = await extrairListaProdutos(mensagemParaIA, { comercianteId: comerciante.id })
   } catch (err) {
-    console.error('[webhook] erro ao extrair lista:', err.message)
+    console.error('[webhook] erro ao extrair lista:', err.message, err.stack)
     await sendText(phone, [
       'Não consegui processar sua lista. Tente novamente ou envie em outro formato:',
       '',
