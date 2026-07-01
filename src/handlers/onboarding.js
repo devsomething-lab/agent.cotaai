@@ -307,7 +307,7 @@ async function processarEtapaRep(telefone, sessao, message) {
               if (com?.telefone) {
                 await sendText(com.telefone, [
                   `*${rep.nome}* (${rep.empresa}) concluiu o cadastro no Kota e está vinculado como seu fornecedor.`,
-                  'Você já pode cotá-los na sua próxima lista.',
+                  'Envie sua lista de compras agora para receber os preços dele.',
                 ].join('\n'))
               }
             }

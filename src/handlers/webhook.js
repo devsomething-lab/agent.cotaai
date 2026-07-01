@@ -100,6 +100,19 @@ function unlockCotacao(cotacaoId) {
   _cotacoesEmProcessamento.delete(cotacaoId)
 }
 
+// ── Aguardando confirmação de salvar catálogo (após resposta manual) ──
+const _pendenteCatalogo = new Map() // phone → { message, expiresAt }
+
+function setPendenteCatalogo(phone, message) {
+  _pendenteCatalogo.set(phone, { message, expiresAt: Date.now() + 5 * 60_000 })
+}
+function getPendenteCatalogo(phone) {
+  const p = _pendenteCatalogo.get(phone)
+  if (!p) return null
+  if (Date.now() > p.expiresAt) { _pendenteCatalogo.delete(phone); return null }
+  return p
+}
+
 // ── Entry point ───────────────────────────────────────────────────────
 
 export async function handleWebhook(payload) {
@@ -822,6 +835,28 @@ async function handleMensagemRepresentante({ rep, message, type, mediaId, mimeTy
     return { ok: true }
   }
 
+  // Se há cotação pendente aguardando resposta deste rep, trata como resposta de cotação
+  // independente do conteúdo — evita que listas de preços sejam classificadas como catálogo
+  if (type === 'texto' || ['planilha', 'pdf', 'foto'].includes(type)) {
+    const envioPendente = await getCotacaoPendentePorTelefone(rep.telefone)
+    if (envioPendente) {
+      return handleRespostaCotacao({ rep, message, type, mediaId, mimeType })
+    }
+  }
+
+  // Verifica se rep confirmou salvar catálogo após resposta manual
+  if (type === 'texto') {
+    const pendente = getPendenteCatalogo(rep.telefone)
+    if (pendente) {
+      _pendenteCatalogo.delete(rep.telefone)
+      if (cmd === 'sim' || cmd === 'salvar' || cmd === 'sim, salvar' || cmd === 's') {
+        return handleAtualizacaoCatalogo({ rep, message: pendente.message, type: 'texto', mediaId: null, mimeType: null })
+      }
+      await sendText(rep.telefone, 'Ok! Os preços não foram salvos no catálogo.')
+      return { ok: true }
+    }
+  }
+
   // Classifica o que o rep está enviando (só para texto)
   let classificacao = 'cotacao'
   if (message && type === 'texto') {
@@ -1071,7 +1106,13 @@ async function handleRespostaCotacao({ rep, message }) {
     .update({ status: 'respondido', modo_resposta: 'manual', respondido_em: new Date().toISOString() })
     .eq('id', envio.id)
 
-  await sendText(rep.telefone, 'Proposta recebida! Obrigado. Se você for escolhido, o pedido chegará em seguida.')
+  await sendText(rep.telefone, [
+    'Proposta recebida! Obrigado. Se você for escolhido, o pedido chegará em seguida.',
+    '',
+    'Quer salvar esses preços no seu catálogo para que futuras cotações desses produtos sejam respondidas automaticamente? Responda *sim* para salvar.',
+  ].join('\n'))
+
+  setPendenteCatalogo(rep.telefone, message)
 
   await verificarEConsolidar(cotacaoId)
   return { ok: true }
