@@ -1177,6 +1177,7 @@ async function handleEscolhaFornecedor({ comerciante, cotacao, resposta }) {
 
   await sendText(comerciante.telefone, [
     `Pedido confirmado.`,
+    `Pedido #${pedido.id.slice(-6).toUpperCase()} · Cotação #${cotacao.id.slice(-6).toUpperCase()}`,
     ``,
     `${repEscolhido.nome} · ${repEscolhido.empresa ?? ''}`,
     linhasPedido,
@@ -1189,7 +1190,8 @@ async function handleEscolhaFornecedor({ comerciante, cotacao, resposta }) {
 
   const resumo = pedidoItens.map(it => `• ${it.produto} ×${it.quantidade} — R$ ${it.preco_total?.toFixed(2)}`).join('\n')
   await sendText(repEscolhido.telefone, [
-    `*Pedido #${pedido.id.slice(-6).toUpperCase()} recebido!*`, '',
+    `*Pedido #${pedido.id.slice(-6).toUpperCase()} recebido!*`,
+    `Cotação #${cotacao.id.slice(-6).toUpperCase()}`, '',
     `Cliente: ${comerciante.nome} (${comerciante.telefone})`, '',
     resumo, '',
     `*Total: R$ ${valorTotal.toFixed(2)}*`,
@@ -1208,7 +1210,7 @@ async function handleVerCotacaoAtual(comerciante, phone) {
     .from('cotacoes')
     .select('*')
     .eq('comerciante_id', comerciante.id)
-    .in('status', ['aguardando_respostas', 'aguardando_escolha', 'aguardando_modo_fechamento', 'escolha_item_a_item', 'consulta'])
+    .in('status', ['aguardando_respostas', 'aguardando_escolha', 'aguardando_modo_fechamento', 'escolha_item_a_item', 'consulta', 'pedido_gerado'])
     .order('criado_em', { ascending: false })
     .limit(1)
     .single()
@@ -1224,28 +1226,46 @@ async function handleVerCotacaoAtual(comerciante, phone) {
     aguardando_modo_fechamento: 'Comparativo pronto — escolha como fechar',
     escolha_item_a_item:        'Escolhendo fornecedor item a item',
     consulta:                   'Salva para consulta',
+    pedido_gerado:              'Pedido gerado',
   }[cotacao.status] ?? cotacao.status
 
   const itensCotacao = await supabase.from('cotacao_itens').select('*').eq('cotacao_id', cotacao.id).order('ordem')
 
-  const itensStr = (itensCotacao.data ?? []).map((it, i) => 
+  const itensStr = (itensCotacao.data ?? []).map((it, i) =>
     `${i+1}. ${it.produto}${it.marca ? ` (${it.marca})` : ''} × ${it.quantidade ?? 1}`
   ).join('\n')
 
-  await sendText(phone, [
+  const linhas = [
     `*Cotação #${cotacao.id.slice(-6).toUpperCase()}*`,
     `Status: ${statusMsg}`,
     `Data: ${new Date(cotacao.criado_em).toLocaleDateString('pt-BR')}`,
     '',
     '*Itens:*',
     itensStr,
-    '',
-    cotacao.status === 'aguardando_escolha' ? 'Envie *comprar* para ver o comparativo e fechar o pedido.' :
-    cotacao.status === 'aguardando_modo_fechamento' ? 'Responda *1*, *2*, *3* ou *4* para escolher como fechar o pedido.' :
-    cotacao.status === 'escolha_item_a_item' ? 'Continue escolhendo o fornecedor de cada item.' :
-    cotacao.status === 'consulta' ? 'Envie *comprar* para retomar e fechar o pedido.' :
-    'Aguarde as respostas dos fornecedores.',
-  ].join('\n'))
+  ]
+
+  if (cotacao.status === 'pedido_gerado') {
+    const { data: pedidos } = await supabase
+      .from('pedidos')
+      .select('id, valor_total, representantes(nome)')
+      .eq('cotacao_id', cotacao.id)
+    if (pedidos?.length) {
+      linhas.push('', '*Pedidos gerados:*')
+      for (const p of pedidos) {
+        linhas.push(`  Pedido #${p.id.slice(-6).toUpperCase()} — ${p.representantes?.nome ?? '?'} — R$ ${p.valor_total?.toFixed(2)}`)
+      }
+    }
+  } else {
+    linhas.push('',
+      cotacao.status === 'aguardando_escolha' ? 'Envie *comprar* para ver o comparativo e fechar o pedido.' :
+      cotacao.status === 'aguardando_modo_fechamento' ? 'Responda *1*, *2*, *3* ou *4* para escolher como fechar o pedido.' :
+      cotacao.status === 'escolha_item_a_item' ? 'Continue escolhendo o fornecedor de cada item.' :
+      cotacao.status === 'consulta' ? 'Envie *comprar* para retomar e fechar o pedido.' :
+      'Aguarde as respostas dos fornecedores.'
+    )
+  }
+
+  await sendText(phone, linhas.join('\n'))
 
   return { ok: true }
 }
@@ -1290,9 +1310,28 @@ async function handleHistorico(comerciante, phone) {
     escolha_item_a_item: '[item a item]', aguardando_respostas: '[aguardando]', consulta: '[consulta]', cancelada: '[cancelada]'
   }
 
-  const linhas = cotacoes.map(c =>
-    `${statusLabel[c.status] ?? '[-]'} *#${c.id.slice(-6).toUpperCase()}* — ${new Date(c.criado_em).toLocaleDateString('pt-BR')} — ${c.input_raw?.slice(0, 40) ?? ''}...`
-  ).join('\n')
+  // Busca pedidos apenas das cotações com status pedido_gerado
+  const idsPedido = cotacoes.filter(c => c.status === 'pedido_gerado').map(c => c.id)
+  let pedidosPorCotacao = {}
+  if (idsPedido.length) {
+    const { data: pedidos } = await supabase
+      .from('pedidos')
+      .select('id, cotacao_id')
+      .in('cotacao_id', idsPedido)
+    for (const p of pedidos ?? []) {
+      if (!pedidosPorCotacao[p.cotacao_id]) pedidosPorCotacao[p.cotacao_id] = []
+      pedidosPorCotacao[p.cotacao_id].push(p.id.slice(-6).toUpperCase())
+    }
+  }
+
+  const linhas = cotacoes.map(c => {
+    const label = statusLabel[c.status] ?? '[-]'
+    const data  = new Date(c.criado_em).toLocaleDateString('pt-BR')
+    const resumo = c.input_raw?.slice(0, 40) ?? ''
+    const pedidosIds = pedidosPorCotacao[c.id]
+    const pedidoStr  = pedidosIds ? ` — Pedido(s): #${pedidosIds.join(', #')}` : ''
+    return `${label} *#${c.id.slice(-6).toUpperCase()}* — ${data} — ${resumo}...${pedidoStr}`
+  }).join('\n')
 
   await sendText(phone, `*Suas últimas cotações:*\n\n${linhas}\n\nEnvie *minha cotação* para ver detalhes da cotação em aberto.`)
   return { ok: true }
@@ -1680,7 +1719,8 @@ async function finalizarPedidos({ comerciante, cotacao, resultado, modo, phone }
     const resumoRep = grupo.itens.map(it => `• ${it.produto} ×${it.quantidade ?? 1} — R$ ${it.preco_total?.toFixed(2)}`).join('\n')
     try {
       await sendText(grupo.rep.telefone, [
-        `*Pedido #${pedido.id.slice(-6).toUpperCase()} recebido!*`, '',
+        `*Pedido #${pedido.id.slice(-6).toUpperCase()} recebido!*`,
+        `Cotação #${cotacao.id.slice(-6).toUpperCase()}`, '',
         `Cliente: ${comerciante.nome} (${comerciante.telefone})`, '',
         resumoRep, '',
         `*Total: R$ ${grupo.subtotal.toFixed(2)}*`,
@@ -1711,6 +1751,7 @@ async function finalizarPedidos({ comerciante, cotacao, resultado, modo, phone }
   try {
     await sendText(phone, [
       criados.length > 1 ? `*${criados.length} pedidos gerados (split):*` : '*Pedido confirmado!*',
+      `Cotação #${cotacao.id.slice(-6).toUpperCase()}`,
       '',
       ...linhas,
       `*Total geral: R$ ${resultado.valorTotal.toFixed(2)}*`,

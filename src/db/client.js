@@ -30,11 +30,21 @@ export async function findOrCreateComercianteByTelefone(telefone, nome = null) {
 
 // ── Representantes ────────────────────────────────────────────────────
 
+function telefoneCandidatos(tel) {
+  const digits = (tel ?? '').replace(/\D/g, '')
+  const set = new Set([digits])
+  if (digits.startsWith('55') && digits.length === 13) set.add('55' + digits.slice(2, 4) + digits.slice(5))
+  if (digits.startsWith('55') && digits.length === 12) set.add('55' + digits.slice(2, 4) + '9' + digits.slice(4))
+  return [...set]
+}
+
 export async function findRepresentanteByTelefone(telefone) {
+  const candidatos = telefoneCandidatos(telefone)
   const { data } = await supabase
     .from('representantes')
     .select('*')
-    .eq('telefone', telefone)
+    .in('telefone', candidatos)
+    .limit(1)
     .single()
   return data
 }
