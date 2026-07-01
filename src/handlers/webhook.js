@@ -1054,6 +1054,30 @@ async function handlePromocao({ rep, message }) {
 
 // ── Rep responde cotação manualmente ─────────────────────────────────
 
+// Encontra o item original da cotação que melhor corresponde ao nome retornado pela IA.
+// Usa pontuação por sobreposição de tokens para lidar com nomes abreviados do representante.
+function encontrarItemOriginal(itens, nomeProduto) {
+  const norm = s => (s ?? '').toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim()
+  const normResp = norm(nomeProduto)
+  // Tenta match exato primeiro
+  const exato = itens.find(i => norm(i.produto) === normResp)
+  if (exato) return exato
+  // Pontuação por sobreposição de tokens
+  const palavras = normResp.split(' ').filter(w => w.length > 1)
+  if (!palavras.length) return null
+  let melhor = null, melhorScore = -Infinity
+  for (const it of itens) {
+    const nItem = norm(it.produto)
+    const hits = palavras.filter(w => nItem.includes(w)).length
+    const palavrasItem = nItem.split(' ').filter(w => w.length > 1)
+    // Penaliza palavras extra no item que não aparecem na resposta (itens mais específicos ficam acima)
+    const extras = palavrasItem.filter(w => !palavras.includes(w)).length
+    const score = hits * 10 - extras
+    if (score > melhorScore) { melhorScore = score; melhor = it }
+  }
+  return melhorScore > 0 ? melhor : null
+}
+
 async function handleRespostaCotacao({ rep, message }) {
   if (!message) {
     await sendText(rep.telefone, 'Para responder a cotação, envie os preços em texto.')
@@ -1085,13 +1109,13 @@ async function handleRespostaCotacao({ rep, message }) {
   const prazoEn = estruturado.prazo_entrega_geral
 
   const propostasParaInserir = estruturado.itens.map(it => {
-    const orig = itens.find(i => i.produto.toLowerCase().includes(it.produto.toLowerCase().split(' ')[0]))
+    const orig = encontrarItemOriginal(itens, it.produto)
     return {
       cotacao_envio_id:     envio.id,
       cotacao_id:           cotacaoId,
       representante_id:     rep.id,
       cotacao_item_id:      orig?.id ?? null,
-      produto:              it.produto,
+      produto:              orig?.produto ?? it.produto,
       preco_unitario:       it.preco_unitario,
       preco_total:          it.preco_unitario != null && orig?.quantidade ? it.preco_unitario * orig.quantidade : null,
       prazo_pagamento_dias: it.prazo_pagamento_dias ?? prazoPg,
@@ -1110,7 +1134,7 @@ async function handleRespostaCotacao({ rep, message }) {
     rep.telefone,
     'Proposta recebida! Obrigado. Se você for escolhido, o pedido chegará em seguida.\n\nQuer salvar esses preços no seu catálogo para que futuras cotações sejam respondidas automaticamente?',
     [
-      { id: 'catalogo_sim', label: 'Sim, salvar' },
+      { id: 'catalogo_sim', label: 'Sim' },
       { id: 'catalogo_nao', label: 'Não' },
     ]
   )
@@ -1568,7 +1592,7 @@ async function dispararCotacao(cotacao, comerciante) {
       msgs.push(`${repsManuais.length} fornecedor(es) sem catálogo serão consultados via WhatsApp`)
       await dispararParaRepsManuais(cotacao, itens, repsManuais)
     }
-    if (itensSemCobertura.length) msgs.push(`${itensSemCobertura.length} item(ns) sem fornecedor no catálogo`)
+    // Não exibir "X itens sem catálogo" — os reps manuais já os cotarão via WhatsApp
     await sendText(phone, msgs.join('\n'))
   }
 }
@@ -1893,7 +1917,7 @@ async function avancarManual({ cotacao, phone, comparacao, itens, propostas, est
   const { item, ofertas } = comparacao[estado.i]
   const qtdStr = item.quantidade ? ` × ${item.quantidade}` : ''
   const linhas = ofertas.map((o, i) =>
-    `${i + 1}. ${o.nome} — R$ ${o.preco_unitario?.toFixed(2)}${o.melhor ? ' ⭐' : ''} (pgto ${o.prazo_pagamento_dias ?? '?'}d · entrega ${o.prazo_entrega_dias ?? '?'}d)`)
+    `${i + 1}. ${o.nome} — R$ ${o.preco_unitario?.toFixed(2)}${o.melhor ? ' [melhor]' : ''} (pgto ${o.prazo_pagamento_dias ?? '?'}d · entrega ${o.prazo_entrega_dias ?? '?'}d)`)
 
   const header = repetir
     ? ['Não entendi — escolha pelo número:', `*${item.produto}${qtdStr}*`]
@@ -1935,8 +1959,8 @@ function templateComparativoPorItem(comparacao, cotacaoId, resumo = null) {
       return
     }
     for (const o of ofertas) {
-      const estrela = o.melhor ? '⭐ ' : '   '
-      msg.push(`${estrela}${o.nome} — R$ ${o.preco_unitario?.toFixed(2)} (pgto ${o.prazo_pagamento_dias ?? '?'}d · entrega ${o.prazo_entrega_dias ?? '?'}d)`)
+      const prefix = o.melhor ? '> ' : '  '
+      msg.push(`${prefix}${o.nome} — R$ ${o.preco_unitario?.toFixed(2)} (pgto ${o.prazo_pagamento_dias ?? '?'}d · entrega ${o.prazo_entrega_dias ?? '?'}d)`)
     }
   })
 
@@ -1954,10 +1978,10 @@ function templateComparativoPorItem(comparacao, cotacaoId, resumo = null) {
 function templateOpcoesFechamento() {
   return [
     '*Como deseja fechar o pedido?*',
-    '1️⃣ Split automático — o melhor preço de cada item',
-    '2️⃣ Fornecedor único — fecho tudo com o melhor no geral',
-    '3️⃣ Fornecedor único — você escolhe qual',
-    '4️⃣ Item a item — você escolhe o fornecedor de cada produto',
+    '1. Split automatico — o melhor preco de cada item',
+    '2. Fornecedor unico — fecho tudo com o melhor no geral',
+    '3. Fornecedor unico — voce escolhe qual',
+    '4. Item a item — voce escolhe o fornecedor de cada produto',
     '',
     'Ou *consulta* p/ salvar sem comprar · *descartar* p/ nova cotação.',
   ].join('\n')
